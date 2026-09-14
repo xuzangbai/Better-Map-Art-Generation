@@ -4,7 +4,31 @@
    Data versions verified from official Mojang client jars (Aug 2026). */
 
 window.MapArtConstants = (() => {
-  const TOOL_VERSION = "v1.3";
+  const TOOL_VERSION = "v1.11";
+
+  /* layout modes: flat floor map art vs. vertical wall pixel art */
+  const LAYOUT_MODES = {
+    FLAT: { id: "flat", name: "平铺（地面地图画）" },
+    WALL: { id: "wall", name: "立式（墙面像素画）" },
+  };
+
+  /* display-name patterns for blocks that cannot be placed on a vertical wall face
+     (need a block below / are not full solid cubes). Sea Lantern is allowed. */
+  const WALL_UNSUPPORTED_PATTERNS = [
+    "carpet", "pressure plate", "slab", "candle", "snow layer", "water", "lava",
+    "iron bars", "cobweb", "glow lichen", "pointed dripstone", "trapdoor", "brewing stand",
+    "torch", "rail", "button", "lever", "door", "sign", "banner", "vine", "kelp", "seagrass",
+    "coral fan", "roots", "sprouts", "berries", "propagule", "petals", "dripleaf",
+    "spore blossom", "frogspawn", "sculk vein", "sugar cane", "wheat", "carrots", "potatoes",
+    "beetroots", "cactus", "bamboo shoot", "end rod", "lightning rod", "chain", "pot",
+    "skull", "head", "bed", "cauldron", "anvil", "campfire", "flower", "sapling",
+  ];
+
+  function isWallUnsupported(displayName) {
+    const lc = String(displayName || "").toLowerCase();
+    if (lc.includes("sea lantern")) return false;
+    return WALL_UNSUPPORTED_PATTERNS.some((p) => lc.includes(p));
+  }
   const SUPPORTED_VERSIONS = [
     { MCVersion: "1.12.2", NBTVersion: 1343 },
     { MCVersion: "1.13.2", NBTVersion: 1631 },
@@ -181,10 +205,42 @@ window.MapArtConstants = (() => {
         [13, 1], [20, 1], [21, 1], [28, 1],
       ],
     },
+    {
+      name: "仅陶瓦",
+      blocks: Array.from({ length: 16 }, (_, i) => [35 + i, 0]),
+    },
+    {
+      name: "陶瓦+羊毛",
+      blocks: Array.from({ length: 16 }, (_, i) => [35 + i, 0]).concat(Array.from({ length: 16 }, (_, i) => [13 + i, 0])),
+    },
+    {
+      name: "综合材料",
+      desc: "陶瓦 + 混凝土 + 羊毛 + 木板 + 原木（混凝土与羊毛同色系时取混凝土）",
+      blocks: [
+        [1, 4], [2, 1], [8, 1], [9, 12], [11, 1], [12, 0],
+        [13, 3], [14, 13], [15, 3], [16, 3], [17, 3], [18, 3], [19, 3], [20, 3], [21, 3], [22, 3],
+        [23, 3], [24, 3], [25, 3], [26, 3], [27, 3], [28, 3], [33, 1],
+        [35, 0], [36, 0], [37, 0], [38, 0], [39, 0], [40, 0], [41, 0], [42, 0], [43, 0], [44, 0],
+        [45, 0], [46, 0], [47, 0], [48, 0], [49, 0], [50, 0], [52, 2], [53, 0], [55, 2], [56, 0],
+      ],
+    },
+    {
+      name: "综合·羊毛",
+      desc: "陶瓦 + 羊毛 + 木板 + 原木（羊毛优先，同色系不用混凝土）",
+      blocks: [
+        [1, 4], [2, 1], [8, 1], [9, 12], [11, 1], [12, 0],
+        [13, 0], [14, 0], [15, 0], [16, 0], [17, 0], [18, 0], [19, 0], [20, 0], [21, 0], [22, 0],
+        [23, 0], [24, 0], [25, 0], [26, 0], [27, 0], [28, 0], [33, 1],
+        [35, 0], [36, 0], [37, 0], [38, 0], [39, 0], [40, 0], [41, 0], [42, 0], [43, 0], [44, 0],
+        [45, 0], [46, 0], [47, 0], [48, 0], [49, 0], [50, 0], [52, 2], [53, 0], [55, 2], [56, 0],
+      ],
+    },
   ];
 
   return {
     TOOL_VERSION,
+    LAYOUT_MODES,
+    isWallUnsupported,
     SUPPORTED_VERSIONS,
     STAIRCASING,
     SUPPORT_MODES,

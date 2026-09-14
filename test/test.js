@@ -575,6 +575,172 @@ function expandLongPackedArray(bytes, bitsPerItem, length) {
   }
   assert(bad17 === 0, "merged NBT matches split blocks at every (x,z) position (errors=" + bad17 + ")");
   assert(pal17.length >= 2 && pal17.includes("minecraft:air") === false, "merged NBT palette valid (" + pal17.length + " entries)");
+  console.log("=== Test 18: wall mode (vertical pixel art) ===");
+  const W18 = 100, H18 = 100;
+  const g18 = makeGenerator({ wallMode: true, staircaseId: K.STAIRCASING.CLASSIC.id, ditherId: K.DITHER_METHODS.None.id });
+  g18.setup();
+  assert(JSON.stringify(g18.getToneKeys()) === JSON.stringify(["normal"]), "wall mode forces normal tone only");
+  const data18 = new Uint8ClampedArray(W18 * H18 * 4);
+  for (let y = 0; y < H18; y++) {
+    for (let x = 0; x < W18; x++) {
+      const i = (y * W18 + x) * 4;
+      // top half colourSet 0 normal, bottom half colourSet 1 normal
+      const tone = y < 50 ? C["0"].tonesRGB.normal : C["1"].tonesRGB.normal;
+      data18[i] = tone[0]; data18[i + 1] = tone[1]; data18[i + 2] = tone[2]; data18[i + 3] = 255;
+    }
+  }
+  await g18.processImageData({ data: data18, width: W18 }, 1, 1);
+  const wallLayout = g18.extractColoursLayoutWall(data18, W18, H18);
+  assert(wallLayout.length === W18 && wallLayout[0].length === H18, "wall layout is W x H");
+  const wallPhys = g18.buildWallPhysicalLayout(wallLayout);
+  assert(JSON.stringify(wallPhys.size) === "[100,100,1]", "wall physical size 100x100x1 (got " + JSON.stringify(wallPhys.size) + ")");
+  assert(wallPhys.blocks.length === W18 * H18, "wall has 10000 blocks (got " + wallPhys.blocks.length + ")");
+  // image top row (row 0, colourSet 0) must be at y = H-1
+  const topBlock = wallPhys.blocks.find((b) => b.x === 0 && b.z === 0 && b.y === H18 - 1);
+  assert(topBlock && topBlock.csId === "0", "image top row at y=H-1 with colourSet 0");
+  const bottomBlock = wallPhys.blocks.find((b) => b.x === 0 && b.z === 0 && b.y === 0);
+  assert(bottomBlock && bottomBlock.csId === "1", "image bottom row at y=0 with colourSet 1");
+  // NBT
+  const wallNbt = g18.buildWallSchematicNbt(wallLayout);
+  const wr18 = new NBTReader(wallNbt.buffer ? wallNbt.buffer : wallNbt);
+  const wroot18 = wr18.readNamedTag();
+  assert(JSON.stringify(wroot18.value.size.value.value) === "[100,100,1]", "wall NBT size 100x100x1");
+  assert(wroot18.value.blocks.value.value.length === 10000, "wall NBT block count 10000");
+  const wpal18 = wroot18.value.palette.value.value.map((p) => p.Name.value);
+  const wblockTop = wroot18.value.blocks.value.value.find((b) => JSON.stringify(b.pos.value.value) === JSON.stringify([0, 99, 0]));
+  assert(wblockTop && wpal18[wblockTop.state.value] === "minecraft:grass_block", "wall NBT top pixel is grass_block at y=99");
+  // litematic
+  const wallLt = g18.buildWallLitematic(wallLayout, "walltest");
+  const wgz18 = zlib.gunzipSync(Buffer.from(wallLt));
+  const wlr18 = new NBTReader(wgz18.buffer.slice(wgz18.byteOffset, wgz18.byteOffset + wgz18.byteLength));
+  const wreg18 = wlr18.readNamedTag().value.Regions.value.mapart.value;
+  const wsize18 = readVec3(wreg18.Size.value);
+  assert(JSON.stringify(wsize18) === "[100,100,1]", "wall litematic size 100x100x1 (got " + JSON.stringify(wsize18) + ")");
+  const wpalNames18 = wreg18.BlockStatePalette.value.value.map((p) => p.Name.value);
+  const wbits18 = Math.max(2, 32 - Math.clz32(wpalNames18.length - 1));
+  const wvol18 = 100 * 100 * 1;
+  const wun18 = expandLongPackedArray(new Uint8Array(wreg18.BlockStates.value), wbits18, wvol18);
+  // index = y*sx*sz + z*sx + x -> flat: idx = y*100 + x
+  const topIdx = (H18 - 1) * 100 + 0;
+  const bottomIdx = 0 * 100 + 0;
+  assert(wpalNames18[wun18[topIdx]] === "minecraft:grass_block", "wall litematic top pixel grass_block (kleppe reader)");
+  assert(wpalNames18[wun18[bottomIdx]] === "minecraft:sand", "wall litematic bottom pixel sand (kleppe reader)");
+
+  console.log("=== Test 19: wall split cells (150x150) ===");
+  const W19 = 150, H19 = 150;
+  const g19 = makeGenerator({ wallMode: true, ditherId: K.DITHER_METHODS.None.id });
+  g19.setup();
+  const data19 = new Uint8ClampedArray(W19 * H19 * 4);
+  for (let y = 0; y < H19; y++) {
+    for (let x = 0; x < W19; x++) {
+      const i = (y * W19 + x) * 4;
+      const tone = C["0"].tonesRGB.normal;
+      data19[i] = tone[0]; data19[i + 1] = tone[1]; data19[i + 2] = tone[2]; data19[i + 3] = 255;
+    }
+  }
+  await g19.processImageData({ data: data19, width: W19 }, 2, 2);
+  const wallLayout19 = g19.extractColoursLayoutWall(data19, W19, H19);
+  const cells = [[0, 0, 128, 128], [1, 0, 22, 128], [0, 1, 128, 22], [1, 1, 22, 22]];
+  let cellsOk = true;
+  for (const [cx, cy, cw, ch] of cells) {
+    const cellNbt = g19.buildWallSchematicNbtCell(wallLayout19, cx * 128, cy * 128, cw, ch);
+    const cr = new NBTReader(cellNbt.buffer ? cellNbt.buffer : cellNbt);
+    const croot = cr.readNamedTag();
+    const csize = croot.value.size.value.value;
+    const cblocks = croot.value.blocks.value.value.length;
+    if (JSON.stringify(csize) !== JSON.stringify([cw, ch, 1]) || cblocks !== cw * ch) {
+      cellsOk = false;
+      console.error("   cell " + cx + "," + cy + " size " + JSON.stringify(csize) + " blocks " + cblocks + " expected " + cw + "x" + ch);
+    }
+  }
+  assert(cellsOk, "150x150 wall splits into 128/22 cells with correct sizes and counts");
+
+  console.log("=== Test 20: solid preset wall safety ===");
+  const solidPreset = [];
+  for (const [csId, cs] of Object.entries(C)) {
+    let chosen = null;
+    for (const [blockId, block] of Object.entries(cs.blocks)) {
+      if (!K.isWallUnsupported(block.displayName)) { chosen = blockId; break; }
+    }
+    if (chosen !== null) solidPreset.push([csId, chosen]);
+  }
+  const unsafe = solidPreset.filter(([csId, blockId]) => K.isWallUnsupported(C[csId].blocks[blockId].displayName));
+  assert(unsafe.length === 0, "solid preset contains only wall-safe blocks (" + solidPreset.length + " colourSets)");
+  const waterHasSolid = Object.values(C["10"].blocks).some((b) => !K.isWallUnsupported(b.displayName));
+  assert(!waterHasSolid, "Water colourSet (10) has no wall-safe block -> disabled in wall mode");
+  const cobwebPick = solidPreset.find(([csId]) => csId === "2");
+  assert(cobwebPick && C["2"].blocks[cobwebPick[1]].displayName === "Mushroom Stem", "Cobweb colourSet falls back to Mushroom Stem");
+  const lichenPick = solidPreset.find(([csId]) => csId === "60");
+  assert(lichenPick && C["60"].blocks[lichenPick[1]].displayName === "Verdant Froglight", "Glow Lichen colourSet falls back to Verdant Froglight");
+
+  console.log("=== Test 21: block presets validity ===");
+  for (const preset of K.BLOCK_PRESETS) {
+    const invalid = preset.blocks.filter(([csId, blockId]) => !C[csId] || !C[csId].blocks[blockId]);
+    assert(invalid.length === 0, "preset「" + preset.name + "」has " + preset.blocks.length + " valid blocks");
+  }
+  const mix = K.BLOCK_PRESETS.find((p) => p.name === "综合材料");
+  assert(mix && mix.blocks.length === 43, "综合材料 preset has 43 colourSets (got " + (mix ? mix.blocks.length : 0) + ")");
+  const mixMaterials = mix.blocks.map(([csId, blockId]) => {
+    const n = C[csId].blocks[blockId].displayName.toLowerCase();
+    if (n.includes("terracotta") && !n.includes("glazed")) return "terracotta";
+    if (n.includes("concrete") && !n.includes("powder")) return "concrete";
+    if (n.endsWith("wool")) return "wool";
+    if (n.includes("planks")) return "planks";
+    return "wood";
+  });
+  const kinds = new Set(mixMaterials);
+  assert(kinds.has("terracotta") && kinds.has("concrete") && kinds.has("planks") && kinds.has("wood"), "综合材料 mixes terracotta/concrete/planks/wood");
+  const woolMix = K.BLOCK_PRESETS.find((p) => p.name === "综合·羊毛");
+  assert(woolMix && woolMix.blocks.length === 43, "综合·羊毛 preset has 43 colourSets (got " + (woolMix ? woolMix.blocks.length : 0) + ")");
+  const woolShared = woolMix.blocks.filter(([csId]) => parseInt(csId, 10) >= 13 && parseInt(csId, 10) <= 28);
+  const allWool = woolShared.every(([csId, blockId]) => C[csId].blocks[blockId].displayName.toLowerCase().endsWith("wool"));
+  assert(allWool, "综合·羊毛 uses wool for all 16 shared colourSets");
+
+  console.log("=== Test 22: transparent PNG background -> empty cells ===");
+  const g22 = makeGenerator({ transparency: true, transparencyTolerance: 128, ditherId: K.DITHER_METHODS.None.id });
+  g22.setup();
+  const data22 = new Uint8ClampedArray(128 * 128 * 4);
+  for (let y = 0; y < 128; y++) {
+    for (let x = 0; x < 128; x++) {
+      const i = (y * 128 + x) * 4;
+      if (x < 64) {
+        // opaque green area (exact colourSet 0 normal)
+        const t = C["0"].tonesRGB.normal;
+        data22[i] = t[0]; data22[i + 1] = t[1]; data22[i + 2] = t[2]; data22[i + 3] = 255;
+      } else {
+        // fully transparent area (RGB 0,0,0 like PNG transparent pixels)
+        data22[i] = 0; data22[i + 1] = 0; data22[i + 2] = 0; data22[i + 3] = 0;
+      }
+    }
+  }
+  await g22.processImageData({ data: data22 }, 1, 1);
+  const l22 = g22.extractColoursLayouts(data22, 1, 1);
+  let transparentCells = 0;
+  for (let x = 0; x < 128; x++) for (let z = 0; z < 128; z++) if (l22[0][0].coloursLayout[x][z].colourSetId === "-1") transparentCells++;
+  assert(transparentCells === 64 * 128, "transparent pixels extracted as empty cells (got " + transparentCells + ")");
+  const nbt22 = g22.buildSchematicNbt(l22[0][0].coloursLayout);
+  const r22 = new NBTReader(nbt22.buffer ? nbt22.buffer : nbt22);
+  const root22 = r22.readNamedTag();
+  assert(root22.value.blocks.value.value.length === 64 * 128, "NBT skips transparent pixels, 8192 blocks (got " + root22.value.blocks.value.value.length + ")");
+  const lt22 = g22.buildLitematicBytes([[l22[0][0]]], "transparent");
+  const gz22 = zlib.gunzipSync(Buffer.from(lt22));
+  const lr22 = new NBTReader(gz22.buffer.slice(gz22.byteOffset, gz22.byteOffset + gz22.byteLength));
+  const reg22 = lr22.readNamedTag().value.Regions.value.mapart.value;
+  const pal22 = reg22.BlockStatePalette.value.value.map((p) => p.Name.value);
+  const bits22 = Math.max(2, 32 - Math.clz32(pal22.length - 1));
+  const un22 = expandLongPackedArray(new Uint8Array(reg22.BlockStates.value), bits22, 128 * 128);
+  let airCells = 0;
+  for (let i = 0; i < 128 * 128; i++) if (pal22[un22[i]] === "minecraft:air") airCells++;
+  assert(airCells === 64 * 128, "litematic has air in transparent area (got " + airCells + ")");
+  // without transparency the transparent area would become a block (black)
+  const g22b = makeGenerator({ transparency: false, ditherId: K.DITHER_METHODS.None.id });
+  g22b.setup();
+  const data22b = new Uint8ClampedArray(data22);
+  await g22b.processImageData({ data: data22b }, 1, 1);
+  const l22b = g22b.extractColoursLayouts(data22b, 1, 1);
+  let empty22b = 0;
+  for (let x = 0; x < 128; x++) for (let z = 0; z < 128; z++) if (l22b[0][0].coloursLayout[x][z].colourSetId === "-1") empty22b++;
+  assert(empty22b === 0, "with option off, no empty cells (old black behaviour)");
 })().catch((e) => {
   console.error("Test harness error:", e);
   process.exit(1);

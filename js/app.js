@@ -13,6 +13,14 @@
     image: null, // HTMLImageElement
     imageName: "",
     imageSize: 0,
+    layoutMode: "flat", // "flat" | "wall"
+    wallW: 100,
+    wallH: 100,
+    flatBlocksBackup: null, // selectedBlocks saved when entering wall mode
+    flatDitherBackup: null, // dither method saved when entering wall mode
+    flatNbtModeBackup: null, // NBT file mode saved when entering wall mode
+    flatLitematicModeBackup: null, // litematic file mode saved when entering wall mode
+    solidPreset: null, // computed per-colourSet solid block preset
     mapsX: 1,
     mapsY: 1,
     version: K.SUPPORTED_VERSIONS[K.SUPPORTED_VERSIONS.length - 1].MCVersion,
@@ -34,9 +42,9 @@
     staircase: K.STAIRCASING.CLASSIC.id,
     dither: K.DITHER_METHODS.FloydSteinberg.id,
     betterColour: true,
-    transparency: false,
-    transparencyTolerance: 128,
     mapdatUnobtainable: false,
+    transparentBg: true, // keep PNG transparent areas empty (default on, PNG only)
+    transparencyThreshold: 128,
     mapdatUseId: true,
     mapdatIdStart: 0,
     supportMode: K.SUPPORT_MODES.NONE.id,
@@ -113,6 +121,9 @@
     }
     bgSel.value = state.bgMode;
 
+    // solid block preset (computed from the colour data; used by wall mode)
+    state.solidPreset = computeSolidPreset();
+
     // default block selection: "Everything" preset
     applyPreset(0);
     renderPalette();
@@ -123,6 +134,8 @@
     // sync checkbox/radio UI with initial state
     $("showGrid").checked = state.showGrid;
     $("mapdatUseId").checked = state.mapdatUseId;
+    $("transparentBg").checked = state.transparentBg;
+    $("transparencyThresholdField").hidden = !state.transparentBg;
     $("toolBadge").textContent = "工具 " + K.TOOL_VERSION;
     updateSizeHint();
     updateGenUI();
@@ -161,6 +174,15 @@
       clearImage();
     });
     $("btnSample").addEventListener("click", loadSampleImage);
+    $("qqBadge").addEventListener("click", () => {
+      const group = "249694605";
+      const done = () => toast("已复制 QQ 群号：" + group + "（BUG 反馈群）");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(group).then(done).catch(() => toast("BUG 反馈 QQ 群：" + group));
+      } else {
+        toast("BUG 反馈 QQ 群：" + group);
+      }
+    });
 
     // number inputs
     $("mapsX").addEventListener("change", (e) => {
@@ -174,6 +196,21 @@
       e.target.value = state.mapsY;
       updateSizeHint();
       schedulePreview();
+    });
+    $("wallW").addEventListener("change", (e) => {
+      state.wallW = clampInt(e.target.value, 1, 512);
+      e.target.value = state.wallW;
+      updateSizeHint();
+      schedulePreview();
+    });
+    $("wallH").addEventListener("change", (e) => {
+      state.wallH = clampInt(e.target.value, 1, 512);
+      e.target.value = state.wallH;
+      updateSizeHint();
+      schedulePreview();
+    });
+    $("layoutMode").addEventListener("change", (e) => {
+      switchLayoutMode(e.target.value);
     });
 
     // selects
@@ -212,14 +249,14 @@
     bindSlider("brightness", "brightnessVal", (v) => v + "%", (v) => (state.brightness = v));
     bindSlider("contrast", "contrastVal", (v) => v + "%", (v) => (state.contrast = v));
     bindSlider("saturation", "saturationVal", (v) => v + "%", (v) => (state.saturation = v));
-    bindSlider("transpTolerance", "transpTolVal", (v) => v, (v) => (state.transparencyTolerance = v));
+    bindSlider("transparencyThreshold", "transparencyThresholdVal", (v) => v, (v) => (state.transparencyThreshold = v));
 
     // checkboxes
     bindCheck("preprocEnabled", (v) => (state.preprocEnabled = v));
     bindCheck("betterColour", (v) => (state.betterColour = v));
-    bindCheck("transparency", (v) => {
-      state.transparency = v;
-      $("transpToleranceField").hidden = !v;
+    bindCheck("transparentBg", (v) => {
+      state.transparentBg = v;
+      $("transparencyThresholdField").hidden = !v;
     });
     bindCheck("mapdatUnobtainable", (v) => (state.mapdatUnobtainable = v));
     bindCheck("mapdatUseId", (v) => {
@@ -292,8 +329,15 @@
       btn.className = "btn btn-small" + (i === 0 ? " btn-primary" : "");
       btn.dataset.preset = String(i);
       btn.textContent = K.BLOCK_PRESETS[i].name;
+      if (K.BLOCK_PRESETS[i].desc) btn.title = K.BLOCK_PRESETS[i].desc + "（" + K.BLOCK_PRESETS[i].blocks.length + " 色）";
       presetRow.appendChild(btn);
     }
+    const solidBtn = document.createElement("button");
+    solidBtn.type = "button";
+    solidBtn.className = "btn btn-small";
+    solidBtn.dataset.preset = "solid";
+    solidBtn.textContent = "固体方块";
+    presetRow.appendChild(solidBtn);
     const clearBtn = document.createElement("button");
     clearBtn.type = "button";
     clearBtn.className = "btn btn-small btn-danger";
@@ -303,7 +347,11 @@
     presetRow.addEventListener("click", (e) => {
       const btn = e.target.closest("[data-preset]");
       if (btn) {
-        applyPreset(parseInt(btn.dataset.preset, 10));
+        if (btn.dataset.preset === "solid") {
+          applySolidPreset();
+        } else {
+          applyPreset(parseInt(btn.dataset.preset, 10));
+        }
         renderPalette();
         updatePaletteCount();
         schedulePreview();
@@ -514,8 +562,126 @@
   }
 
   function updateSizeHint() {
-    $("sizeHint").textContent = `共 ${state.mapsX * state.mapsY} 张地图，图片将被缩放为 ${state.mapsX * 128} × ${state.mapsY * 128} 像素`;
+    if (state.layoutMode === "wall") {
+      $("wallSizeHint").textContent = `墙面 ${state.wallW} × ${state.wallH} 方块，图片将被缩放为 ${state.wallW} × ${state.wallH}`;
+    } else {
+      $("sizeHint").textContent = `共 ${state.mapsX * state.mapsY} 张地图，图片将被缩放为 ${state.mapsX * 128} × ${state.mapsY * 128} 像素`;
+    }
   }
+
+  function getTargetW() {
+    return state.layoutMode === "wall" ? state.wallW : state.mapsX * 128;
+  }
+
+  function getTargetH() {
+    return state.layoutMode === "wall" ? state.wallH : state.mapsY * 128;
+  }
+
+  /* the transparent background option only applies to PNG images */
+  function isPngImage() {
+    if (!state.image) return false;
+    if (/^data:image\/png/i.test(state.image.src)) return true;
+    return /\.png$/i.test(state.imageName || "");
+  }
+
+  /* resolve a block's modern NBT name from the colour data (for classification) */
+  function resolveBlockNbtName(block) {
+    let ref = block.validVersions["1.20"] || block.validVersions["1.13.2"];
+    if (ref === undefined) {
+      const first = Object.values(block.validVersions)[0];
+      ref = typeof first === "string" ? block.validVersions[first.slice(1)] : first;
+    }
+    let guard = 0;
+    while (typeof ref === "string" && ref[0] === "&" && guard++ < 10) ref = block.validVersions[ref.slice(1)];
+    return ref ? ref.NBTName : "";
+  }
+
+  /* per-colourSet solid block preset: first block that can be placed on a wall face */
+  function computeSolidPreset() {
+    const preset = [];
+    for (const [csId, cs] of Object.entries(C)) {
+      let chosen = null;
+      for (const [blockId, block] of Object.entries(cs.blocks)) {
+        if (!K.isWallUnsupported(block.displayName)) {
+          chosen = blockId;
+          break;
+        }
+      }
+      if (chosen !== null) preset.push([parseInt(csId, 10), parseInt(chosen, 10)]);
+    }
+    return preset;
+  }
+
+  function isColourSetWallUsable(cs) {
+    return Object.values(cs.blocks).some((b) => !K.isWallUnsupported(b.displayName));
+  }
+
+  function switchLayoutMode(mode) {
+    if (mode === state.layoutMode) return;
+    const wasWall = state.layoutMode === "wall";
+    state.layoutMode = mode;
+    const isWall = mode === "wall";
+
+    if (isWall) {
+      // remember flat selection, then switch to the solid preset
+      state.flatBlocksBackup = Object.assign({}, state.selectedBlocks);
+      applySolidPreset();
+      // wall mode defaults to no dithering (block textures are viewed directly)
+      state.flatDitherBackup = state.dither;
+      state.dither = K.DITHER_METHODS.None.id;
+      $("dither").value = state.dither;
+      // wall mode defaults to whole-wall single files
+      state.flatNbtModeBackup = state.nbtMode;
+      state.flatLitematicModeBackup = state.litematicMode;
+      state.nbtMode = "merged";
+      state.litematicMode = "merged";
+      $("nbtMode").value = "merged";
+      $("litematicMode").value = "merged";
+    } else if (wasWall && state.flatBlocksBackup) {
+      state.selectedBlocks = state.flatBlocksBackup;
+      state.flatBlocksBackup = null;
+      if (state.flatDitherBackup !== null) {
+        state.dither = state.flatDitherBackup;
+        state.flatDitherBackup = null;
+        $("dither").value = state.dither;
+      }
+      if (state.flatNbtModeBackup !== null) {
+        state.nbtMode = state.flatNbtModeBackup;
+        state.flatNbtModeBackup = null;
+        $("nbtMode").value = state.nbtMode;
+      }
+      if (state.flatLitematicModeBackup !== null) {
+        state.litematicMode = state.flatLitematicModeBackup;
+        state.flatLitematicModeBackup = null;
+        $("litematicMode").value = state.litematicMode;
+      }
+    }
+
+    // UI visibility
+    $("flatSizeField").hidden = isWall;
+    $("wallSizeField").hidden = !isWall;
+    $("staircaseField").style.display = isWall ? "none" : "";
+    $("supportPanel").style.display = isWall ? "none" : "";
+    $("fmtMapdatLabel").style.display = isWall ? "none" : "";
+    if (isWall && state.formats.mapdat) {
+      state.formats.mapdat = false;
+      $("fmtMapdat").checked = false;
+    }
+    updateMapdatOptsVisibility();
+    updateSizeHint();
+    updateGenUI();
+    renderPalette();
+    updatePaletteCount();
+    schedulePreview();
+  }
+
+  function applySolidPreset() {
+    for (const key of Object.keys(C)) state.selectedBlocks[key] = "-1";
+    for (const [csId, blockId] of state.solidPreset) {
+      if (C[csId] && C[csId].blocks[blockId]) state.selectedBlocks[csId] = String(blockId);
+    }
+  }
+
 
   function updateGenName() {
     $("genName").textContent = getBaseName();
@@ -536,23 +702,24 @@
   }
 
   function updateMapdatOptsVisibility() {
-    const mapdatOn = state.formats.mapdat;
-    $("mapdatOpts").style.display = mapdatOn ? "" : "none";
+    const mapdatOn = state.formats.mapdat && state.layoutMode !== "wall";
     $("mapdatOpts2").style.display = mapdatOn ? "" : "none";
     $("mapdatIdStartField").style.display = mapdatOn && state.mapdatUseId ? "" : "none";
-    $("transpToleranceField").style.display = mapdatOn && state.transparency ? "" : "none";
   }
 
   /* ---------------- generator / quantization ---------------- */
 
   function getGenSignature() {
     return JSON.stringify({
+      lm: state.layoutMode,
+      ww: state.wallW,
+      wh: state.wallH,
       v: state.version,
-      s: state.staircase,
+      s: state.layoutMode === "wall" ? -1 : state.staircase,
       d: state.dither,
       b: state.betterColour,
-      t: state.transparency && state.formats.mapdat,
-      tt: state.transparencyTolerance,
+      t: state.transparentBg && isPngImage(),
+      tt: state.transparencyThreshold,
       u: state.mapdatUnobtainable,
       sb: state.selectedBlocks,
       img: state.image ? state.image.src : null,
@@ -581,18 +748,17 @@
       betterColour: state.betterColour,
       ditherId: state.dither,
       selectedBlocks: state.selectedBlocks,
-      transparency: state.transparency && state.formats.mapdat,
-      transparencyTolerance: state.transparencyTolerance,
+      transparency: state.transparentBg && isPngImage(),
+      transparencyTolerance: state.transparencyThreshold,
       mapdatUnobtainable: state.mapdatUnobtainable,
+      wallMode: state.layoutMode === "wall",
     });
   }
 
   // prepare source pixels (crop + preprocess)
   function prepareSourceImage() {
-    const mapsX = state.mapsX;
-    const mapsY = state.mapsY;
-    const tw = mapsX * 128;
-    const th = mapsY * 128;
+    const tw = getTargetW();
+    const th = getTargetH();
     const img = state.image;
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
@@ -695,8 +861,15 @@
     const gen = newGenerator();
     gen.setup();
     const imageData = prepareSourceImage();
-    const quantized = await gen.processImageData(imageData, state.mapsX, state.mapsY, onProgress);
-    const layouts = gen.extractColoursLayouts(imageData.data, state.mapsX, state.mapsY);
+    const W = getTargetW();
+    const H = getTargetH();
+    const cellsX = Math.ceil(W / 128);
+    const cellsY = Math.ceil(H / 128);
+    const quantized = await gen.processImageData(imageData, cellsX, cellsY, onProgress);
+    const layouts =
+      state.layoutMode === "wall"
+        ? gen.extractColoursLayoutWall(imageData.data, W, H)
+        : gen.extractColoursLayouts(imageData.data, state.mapsX, state.mapsY);
     state.gen = gen;
     state.genSignature = signature;
     state.quantized = { pixels: imageData.data, maps: quantized.maps };
@@ -721,7 +894,11 @@
       if (token !== state.previewToken) return;
       drawPreview();
       updateStats();
-      $("previewInfo").textContent = `分辨率 ${state.mapsX * 128}×${state.mapsY * 128} · 地图 ${state.mapsX}×${state.mapsY} · 已启用 ${getSelectedBlockCount()}/61 色`;
+      if (state.layoutMode === "wall") {
+        $("previewInfo").textContent = `墙面 ${state.wallW}×${state.wallH} 方块 · 立式模式 · 已启用 ${getSelectedBlockCount()}/61 色`;
+      } else {
+        $("previewInfo").textContent = `分辨率 ${state.mapsX * 128}×${state.mapsY * 128} · 地图 ${state.mapsX}×${state.mapsY} · 已启用 ${getSelectedBlockCount()}/61 色`;
+      }
       $("previewSize").textContent = `原图 ${state.image.naturalWidth}×${state.image.naturalHeight}`;
       updateGenUI();
     } catch (e) {
@@ -747,8 +924,8 @@
       $("canvasEmpty").hidden = false;
       return;
     }
-    const tw = state.mapsX * 128;
-    const th = state.mapsY * 128;
+    const tw = getTargetW();
+    const th = getTargetH();
     canvas.width = tw;
     canvas.height = th;
     const ctx = canvas.getContext("2d");
@@ -758,13 +935,15 @@
     if (state.showGrid) {
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
       ctx.lineWidth = 1;
-      for (let x = 1; x < state.mapsX; x++) {
+      const cellsX = Math.ceil(tw / 128);
+      const cellsY = Math.ceil(th / 128);
+      for (let x = 1; x < cellsX; x++) {
         ctx.beginPath();
         ctx.moveTo(x * 128 + 0.5, 0);
         ctx.lineTo(x * 128 + 0.5, th);
         ctx.stroke();
       }
-      for (let y = 1; y < state.mapsY; y++) {
+      for (let y = 1; y < cellsY; y++) {
         ctx.beginPath();
         ctx.moveTo(0, y * 128 + 0.5);
         ctx.lineTo(tw, y * 128 + 0.5);
@@ -792,7 +971,7 @@
       }
     }
     let supportCount = 0;
-    if (state.supportMode !== K.SUPPORT_MODES.NONE.id || state.includeNoobline) {
+    if (state.layoutMode !== "wall" && (state.supportMode !== K.SUPPORT_MODES.NONE.id || state.includeNoobline)) {
       try {
         const gen = state.gen || newGenerator();
         const result = gen.buildMergedPhysicalLayout(state.layouts);
@@ -860,6 +1039,7 @@
     const list = $("blockList");
     list.innerHTML = "";
     const search = state.blockSearch;
+    const isWall = state.layoutMode === "wall";
     for (const [csId, cs] of Object.entries(C)) {
       const blocks = Object.entries(cs.blocks);
       const tone = cs.tonesRGB.normal || cs.tonesRGB.dark;
@@ -867,8 +1047,9 @@
       const blockNames = blocks.map(([, b]) => b.displayName).join(" ");
       if (search && !cs.colourName.toLowerCase().includes(search) && !blockNames.toLowerCase().includes(search)) continue;
 
+      const usableInWall = !isWall || isColourSetWallUsable(cs);
       const item = document.createElement("div");
-      item.className = "block-item" + (state.selectedBlocks[csId] !== "-1" ? " enabled" : "");
+      item.className = "block-item" + (state.selectedBlocks[csId] !== "-1" ? " enabled" : "") + (usableInWall ? "" : " disabled");
 
       const swatch = document.createElement("span");
       swatch.className = "swatch";
@@ -876,21 +1057,28 @@
 
       const nameWrap = document.createElement("div");
       nameWrap.className = "block-item-name";
-      nameWrap.innerHTML = `<span title="${esc(cs.colourName)}">${esc(cs.colourName)}</span><span class="label-sm">色号 ${csId}${cs.mapdatId !== undefined ? " · map " + cs.mapdatId : ""}</span>`;
+      nameWrap.innerHTML = `<span title="${esc(cs.colourName)}">${esc(cs.colourName)}</span><span class="label-sm">色号 ${csId}${cs.mapdatId !== undefined ? " · map " + cs.mapdatId : ""}${usableInWall ? "" : " · 立式不可用"}</span>`;
 
       const sel = document.createElement("select");
       sel.dataset.cs = csId;
       const offOpt = document.createElement("option");
       offOpt.value = "-1";
-      offOpt.textContent = "不启用";
+      offOpt.textContent = usableInWall ? "不启用" : "立式不可用";
       sel.appendChild(offOpt);
       for (const [blockId, block] of blocks) {
         const opt = document.createElement("option");
         opt.value = blockId;
-        opt.textContent = block.displayName + (block.supportBlockMandatory ? " (需支撑)" : "");
+        const unsupported = K.isWallUnsupported(block.displayName);
+        opt.textContent = block.displayName + (block.supportBlockMandatory ? " (需支撑)" : "") + (isWall && unsupported ? "（不能上墙）" : "");
+        if (isWall && unsupported) opt.disabled = true;
         sel.appendChild(opt);
       }
-      sel.value = state.selectedBlocks[csId] !== undefined ? String(state.selectedBlocks[csId]) : "-1";
+      if (!usableInWall) {
+        sel.disabled = true;
+        sel.value = "-1";
+      } else {
+        sel.value = state.selectedBlocks[csId] !== undefined ? String(state.selectedBlocks[csId]) : "-1";
+      }
       sel.addEventListener("change", () => {
         state.selectedBlocks[csId] = sel.value;
         item.classList.toggle("enabled", sel.value !== "-1");
@@ -940,7 +1128,23 @@
         setStatus("正在生成 Schematic (.nbt)…");
         await yieldToUI();
         const folder = K.OUTPUT_FORMATS.NBT.folder;
-        if (state.nbtMode === "merged") {
+        if (state.layoutMode === "wall") {
+          if (state.nbtMode === "merged") {
+            const bytes = gen.buildWallSchematicNbt(layouts, "MapArt Generator");
+            files.push({ name: `${folder}/${baseName}.nbt`, data: bytes });
+          } else {
+            const W = state.wallW, H = state.wallH;
+            const cellsX = Math.ceil(W / 128), cellsY = Math.ceil(H / 128);
+            for (let cy = 0; cy < cellsY; cy++) {
+              for (let cx = 0; cx < cellsX; cx++) {
+                const cw = Math.min(128, W - cx * 128);
+                const ch = Math.min(128, H - cy * 128);
+                const bytes = gen.buildWallSchematicNbtCell(layouts, cx * 128, cy * 128, cw, ch, "MapArt Generator");
+                files.push({ name: `${folder}/part_${cx}_${cy}.nbt`, data: bytes });
+              }
+            }
+          }
+        } else if (state.nbtMode === "merged") {
           const bytes = gen.buildSchematicNbtMerged(layouts, "MapArt Generator");
           files.push({ name: `${folder}/${baseName}.nbt`, data: bytes });
         } else {
@@ -959,7 +1163,23 @@
         setStatus("正在生成 Litematic (.litematic)…");
         await yieldToUI();
         const folder = K.OUTPUT_FORMATS.LITEMATIC.folder;
-        if (state.litematicMode === "split") {
+        if (state.layoutMode === "wall") {
+          if (state.litematicMode === "split") {
+            const W = state.wallW, H = state.wallH;
+            const cellsX = Math.ceil(W / 128), cellsY = Math.ceil(H / 128);
+            for (let cy = 0; cy < cellsY; cy++) {
+              for (let cx = 0; cx < cellsX; cx++) {
+                const cw = Math.min(128, W - cx * 128);
+                const ch = Math.min(128, H - cy * 128);
+                const bytes = gen.buildWallLitematicCell(layouts, cx * 128, cy * 128, cw, ch, `${baseName}_part_${cx}_${cy}`, "MapArt Generator");
+                files.push({ name: `${folder}/${baseName}_part_${cx}_${cy}.litematic`, data: bytes });
+              }
+            }
+          } else {
+            const bytes = gen.buildWallLitematic(layouts, baseName, "MapArt Generator");
+            files.push({ name: `${folder}/${baseName}.litematic`, data: bytes });
+          }
+        } else if (state.litematicMode === "split") {
           for (let my = 0; my < state.mapsY; my++) {
             for (let mx = 0; mx < state.mapsX; mx++) {
               const single = [[layouts[my][mx]]];
@@ -975,7 +1195,7 @@
         setProgress(step);
       }
 
-      if (formats.includes("mapdat")) {
+      if (formats.includes("mapdat") && state.layoutMode !== "wall") {
         setStatus("正在生成 MapData (map.dat)…");
         await yieldToUI();
         const folder = K.OUTPUT_FORMATS.MAPDAT.folder;
@@ -1032,21 +1252,39 @@
 
   function buildReadme(formats, baseName) {
     const lines = [];
+    const isWall = state.layoutMode === "wall";
     lines.push("MC 地图画生成器 - 输出文件说明");
     lines.push("=".repeat(30));
     lines.push("");
     lines.push("配置：");
     lines.push(`  游戏版本: ${state.version}`);
-    lines.push(`  地图网格: ${state.mapsX} × ${state.mapsY} 张 (${state.mapsX * 128} × ${state.mapsY * 128} 像素)`);
-    lines.push(`  3D 模式: ${Object.values(K.STAIRCASING).find((m) => m.id === state.staircase).name}`);
+    if (isWall) {
+      lines.push(`  布局模式: 立式（墙面像素画）`);
+      lines.push(`  墙面尺寸: ${state.wallW} × ${state.wallH} 方块（1 格 = 1 像素，厚 1 格）`);
+      lines.push(`  说明: 图片顶部在墙的最上方，墙的底边在 y=0，朝南（+Z）方向观看`);
+    } else {
+      lines.push(`  布局模式: 平铺（地面地图画）`);
+      lines.push(`  地图网格: ${state.mapsX} × ${state.mapsY} 张 (${state.mapsX * 128} × ${state.mapsY * 128} 像素)`);
+      lines.push(`  3D 模式: ${Object.values(K.STAIRCASING).find((m) => m.id === state.staircase).name}`);
+      lines.push(`  支撑方块模式: ${Object.values(K.SUPPORT_MODES).find((m) => m.id === state.supportMode).name}`);
+      lines.push(`  对齐行(noobline): ${state.includeNoobline ? "包含" : "不包含"}`);
+    }
     lines.push(`  抖动: ${Object.values(K.DITHER_METHODS).find((m) => m.id === state.dither).name}`);
-    lines.push(`  支撑方块模式: ${Object.values(K.SUPPORT_MODES).find((m) => m.id === state.supportMode).name}`);
-    lines.push(`  对齐行(noobline): ${state.includeNoobline ? "包含" : "不包含"}`);
+    lines.push(`  透明背景: ${state.transparentBg ? "开" : "关"}${isPngImage() ? "（PNG 生效）" : "（当前图片不是 PNG）"}`);
     lines.push(`  已启用颜色: ${getSelectedBlockCount()} 种`);
     lines.push("");
     lines.push("各文件夹用法：");
     if (formats.includes("nbt")) {
-      if (state.nbtMode === "merged") {
+      if (isWall) {
+        if (state.nbtMode === "merged") {
+          lines.push(`  [Schematic-NBT/] 整面墙一个 .nbt 文件（${baseName}.nbt）`);
+        } else {
+          lines.push(`  [Schematic-NBT/] 墙面按 128×128 方块分区，每区一个 .nbt 文件（part_x_y.nbt）`);
+        }
+        lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
+        lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
+        lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
+      } else if (state.nbtMode === "merged") {
         lines.push(`  [Schematic-NBT/] 整幅地图画一个 .nbt 文件（${baseName}.nbt）`);
         lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
@@ -1059,7 +1297,16 @@
       }
     }
     if (formats.includes("litematic")) {
-      if (state.litematicMode === "split") {
+      if (isWall) {
+        if (state.litematicMode === "split") {
+          lines.push(`  [Litematic/] 墙面按 128×128 方块分区，每区一个 .litematic 文件`);
+          lines.push(`    - 文件名 ${baseName}_part_x_y.litematic，x 为横向、y 为纵向序号`);
+          lines.push(`    - 放入 .minecraft/schematics/ 文件夹，游戏内按 M 打开加载`);
+        } else {
+          lines.push(`  [Litematic/] 整面墙一个 .litematic 文件（Litematica 模组专用格式）`);
+          lines.push(`    - 放入 .minecraft/schematics/ 文件夹，游戏内按 M 打开加载`);
+        }
+      } else if (state.litematicMode === "split") {
         lines.push(`  [Litematic/] 每张地图一个 .litematic 文件（Litematica 模组专用格式）`);
         lines.push(`    - 共 ${state.mapsX * state.mapsY} 个文件，文件名 ${baseName}_map_x_y.litematic，x 为横向、y 为纵向序号`);
         lines.push(`    - 放入 .minecraft/schematics/ 文件夹，游戏内按 M 打开加载`);
@@ -1077,9 +1324,17 @@
     }
     lines.push("");
     lines.push("提示：");
-    lines.push("  - 地图画在游戏中固定对齐 128×128 网格，地图以北为正上方");
-    lines.push("  - 无支撑时仅生成画面方块，可直接粘贴在平整地面上");
-    lines.push("  - 开启“包含北侧对齐行”可帮助地图精确对齐，生成后需手动拆掉");
+    if (isWall) {
+      lines.push("  - 立式模式生成的是一堵 1 格厚的竖墙，直接观看，不用于地图");
+      lines.push("  - 方块已限制为可贴在墙上的固体方块（沙子等重力方块在墙内有下方支撑不会掉落）");
+      lines.push("  - 建议选一块平整地面放置，墙的底边落在 y=0");
+    } else {
+      lines.push("  - 地图画在游戏中固定对齐 128×128 网格，地图以北为正上方");
+      lines.push("  - 无支撑时仅生成画面方块，可直接粘贴在平整地面上");
+      lines.push("  - 开启“包含北侧对齐行”可帮助地图精确对齐，生成后需手动拆掉");
+    }
+    lines.push("");
+    lines.push("问题反馈：QQ 群 249694605");
     return new TextEncoder().encode(lines.join("\r\n"));
   }
 
