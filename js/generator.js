@@ -33,6 +33,7 @@ class MapGenerator {
     this.transparency = !!opts.transparency;
     this.transparencyTolerance = opts.transparencyTolerance || 128;
     this.mapdatUnobtainable = !!opts.mapdatUnobtainable;
+    this.wallMode = !!opts.wallMode; // vertical wall pixel art (image rows -> Y, 1 block thick)
 
     this.colourSetsToUse = [];
     this.exactColourCache = new Map();
@@ -162,6 +163,7 @@ class MapGenerator {
   }
 
   getToneKeys() {
+    if (this.wallMode) return ["normal"]; // a 1-block-thick wall uses only the normal shade
     const s = window.MapArtConstants.STAIRCASING;
     switch (this.staircaseId) {
       case s.OFF.id: return ["normal"];
@@ -193,8 +195,8 @@ class MapGenerator {
   // returns { maps: mapsY x mapsX of {materials:{colourSetId:count}} }
   async processImageData(imageData, mapsX, mapsY, onProgress) {
     const data = imageData.data;
-    const multimapWidth = mapsX * 128;
-    const totalRows = mapsY * 128;
+    const multimapWidth = imageData.width || mapsX * 128;
+    const totalRows = Math.floor(data.length / 4 / multimapWidth);
     const maps = [];
     for (let my = 0; my < mapsY; my++) {
       const row = [];
@@ -663,6 +665,63 @@ class MapGenerator {
     return { name: "minecraft:" + data.NBTName, args: data.NBTArgs || {} };
   }
 
+  /* ----- wall mode (vertical pixel art) ----- */
+
+  // layout: [x][row] of {colourSetId, tone}; row 0 = image top (highest y)
+  buildWallPhysicalLayout(layout) {
+    const W = layout.length;
+    const H = layout[0].length;
+    const blocks = [];
+    for (let x = 0; x < W; x++) {
+      for (let row = 0; row < H; row++) {
+        const p = layout[x][row];
+        if (!p || p.colourSetId === "-1") continue;
+        blocks.push({ x, y: H - 1 - row, z: 0, csId: p.colourSetId });
+      }
+    }
+    return { blocks, size: [W, H, 1], supportCount: 0 };
+  }
+
+  // slice a wall layout into a cell (for split output), re-indexed to local coords
+  sliceWallLayout(layout, cx, cy, cw, ch) {
+    const out = [];
+    for (let x = 0; x < cw; x++) {
+      out.push(layout[cx + x].slice(cy, cy + ch));
+    }
+    return out;
+  }
+
+  // pixelsData: RGBA of W x H image; returns layout [x][row]
+  extractColoursLayoutWall(pixelsData, W, H) {
+    const layout = [];
+    for (let x = 0; x < W; x++) {
+      const col = [];
+      for (let row = 0; row < H; row++) {
+        const offset = 4 * (row * W + x);
+        const csAndTone = this.exactRGBToColourSetIdAndTone([pixelsData[offset], pixelsData[offset + 1], pixelsData[offset + 2]]);
+        col.push(csAndTone || { colourSetId: "-1", tone: "normal" });
+      }
+      layout.push(col);
+    }
+    return layout;
+  }
+
+  buildWallSchematicNbt(layout, author) {
+    return this.assembleSchematicNbt(this.buildWallPhysicalLayout(layout), author);
+  }
+
+  buildWallSchematicNbtCell(layout, cx, cy, cw, ch, author) {
+    return this.assembleSchematicNbt(this.buildWallPhysicalLayout(this.sliceWallLayout(layout, cx, cy, cw, ch)), author);
+  }
+
+  buildWallLitematic(layout, baseName, author) {
+    return this.assembleLitematic(this.buildWallPhysicalLayout(layout), baseName, author);
+  }
+
+  buildWallLitematicCell(layout, cx, cy, cw, ch, baseName, author) {
+    return this.assembleLitematic(this.buildWallPhysicalLayout(this.sliceWallLayout(layout, cx, cy, cw, ch)), baseName, author);
+  }
+
   /* ----- step 4: Schematica-format .nbt output (one per map) ----- */
 
   buildSchematicNbt(coloursLayout, author) {
@@ -735,7 +794,10 @@ class MapGenerator {
 
   // maps: mapsY x mapsX, each .coloursLayout is [x 0..127][z 0..127]
   buildLitematicBytes(maps, baseName, author) {
-    const layoutResult = this.buildMergedPhysicalLayout(maps);
+    return this.assembleLitematic(this.buildMergedPhysicalLayout(maps), baseName, author);
+  }
+
+  assembleLitematic(layoutResult, baseName, author) {
     const blocks = layoutResult.blocks;
     const size = layoutResult.size; // [sx, sy, sz]
     const sx = size[0], sy = size[1], sz = size[2];

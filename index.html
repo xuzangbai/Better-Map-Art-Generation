@@ -21,8 +21,9 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <span class="badge" id="toolBadge">工具 v1.3</span>
+      <span class="badge" id="toolBadge">工具 v1.11</span>
       <span class="badge" id="versionBadge">版本 1.21.11</span>
+      <span class="badge badge-link" id="qqBadge" title="点击复制 QQ 群号">BUG 反馈群 249694605</span>
     </div>
   </div>
 </header>
@@ -60,6 +61,13 @@
     <section class="panel">
       <h2 class="panel-title">2 · 输出设置</h2>
       <div class="field">
+        <label class="label">布局模式</label>
+        <select id="layoutMode">
+          <option value="flat" selected>平铺（地面地图画）</option>
+          <option value="wall">立式（墙面像素画）</option>
+        </select>
+      </div>
+      <div class="field">
         <label class="label">游戏版本</label>
         <select id="mcVersion"></select>
       </div>
@@ -68,7 +76,7 @@
         <div class="check-grid" id="formatChecks">
           <label class="check"><input type="checkbox" id="fmtNbt" checked><span class="ck-box"></span><span class="ck-label">Schematic (.nbt)<small>按地图拆分，Litematica/Schematica 可加载</small></span></label>
           <label class="check"><input type="checkbox" id="fmtLitematic" checked><span class="ck-box"></span><span class="ck-label">Litematic (.litematic)<small>整图单文件，Litematica 模组直接使用</small></span></label>
-          <label class="check"><input type="checkbox" id="fmtMapdat"><span class="ck-box"></span><span class="ck-label">MapData (map.dat)<small>替换存档 map_*.dat，支持透明</small></span></label>
+          <label class="check" id="fmtMapdatLabel"><input type="checkbox" id="fmtMapdat"><span class="ck-box"></span><span class="ck-label">MapData (map.dat)<small>替换存档 map_*.dat，支持透明</small></span></label>
         </div>
       </div>
       <div class="field">
@@ -92,7 +100,7 @@
           <option value="merged">整图单文件（合并）</option>
         </select>
       </div>
-      <div class="field">
+      <div class="field" id="flatSizeField">
         <label class="label">地图尺寸（每张 128×128 像素）</label>
         <div class="size-row">
           <input type="number" id="mapsX" min="1" max="64" value="1" class="num-input">
@@ -100,6 +108,15 @@
           <input type="number" id="mapsY" min="1" max="64" value="1" class="num-input">
         </div>
         <p class="hint" id="sizeHint">共 1 张地图，图片将被缩放为 128 × 128</p>
+      </div>
+      <div class="field" id="wallSizeField" hidden>
+        <label class="label">墙面尺寸（方块，1 格 = 1 像素）</label>
+        <div class="size-row">
+          <input type="number" id="wallW" min="1" max="512" value="100" class="num-input">
+          <span class="times">×</span>
+          <input type="number" id="wallH" min="1" max="512" value="100" class="num-input">
+        </div>
+        <p class="hint" id="wallSizeHint">墙面 100 × 100 方块，图片将被缩放为 100 × 100</p>
       </div>
     </section>
 
@@ -122,6 +139,15 @@
           <label class="label">垂直偏移 <span class="val" id="cropYVal">50%</span></label>
           <input type="range" id="cropY" min="0" max="100" value="50">
         </div>
+      </div>
+
+      <div class="field">
+        <label class="label check-inline"><input type="checkbox" id="transparentBg" checked><span class="ck-box"></span><span class="ck-label">透明背景（仅 PNG 文件生效）</span></label>
+        <p class="hint">透明区域不放置方块：墙面为镂空、地面地图画显示下方地形、map.dat 为透明像素</p>
+      </div>
+      <div class="field" id="transparencyThresholdField">
+        <label class="label">透明阈值 <span class="val" id="transparencyThresholdVal">128</span></label>
+        <input type="range" id="transparencyThreshold" min="0" max="256" value="128">
       </div>
 
       <details class="sub-group" id="preprocGroup">
@@ -158,7 +184,7 @@
 
     <section class="panel">
       <h2 class="panel-title">4 · 地图模式</h2>
-      <div class="field">
+      <div class="field" id="staircaseField">
         <label class="label">3D 模式（色阶数量）</label>
         <select id="staircase"></select>
       </div>
@@ -168,13 +194,6 @@
       </div>
       <div class="field">
         <label class="label check-inline"><input type="checkbox" id="betterColour" checked><span class="ck-box"></span><span class="ck-label">更好的颜色（Lab 色彩空间匹配）</span></label>
-      </div>
-      <div class="field" id="mapdatOpts">
-        <label class="label check-inline"><input type="checkbox" id="transparency"><span class="ck-box"></span><span class="ck-label">透明像素（仅 map.dat 输出有效）</span></label>
-      </div>
-      <div class="field" id="transpToleranceField" hidden>
-        <label class="label">透明度阈值 <span class="val" id="transpTolVal">128</span></label>
-        <input type="range" id="transpTolerance" min="0" max="256" value="128">
       </div>
       <div class="field" id="mapdatOpts2">
         <label class="label check-inline"><input type="checkbox" id="mapdatUnobtainable"><span class="ck-box"></span><span class="ck-label">map.dat 使用“不可获得”色阶（unobtainable）</span></label>
@@ -188,7 +207,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="supportPanel">
       <h2 class="panel-title">5 · 支撑结构 <span class="tag tag-green">默认仅画</span></h2>
       <p class="hint" style="margin-top:0">默认只生成画面部分，不含任何辅助方块。</p>
       <div class="field">
