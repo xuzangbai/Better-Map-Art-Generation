@@ -21,12 +21,19 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <span class="badge" id="toolBadge">工具 v1.11</span>
+      <span class="badge" id="toolBadge">工具 v1.24</span>
       <span class="badge" id="versionBadge">版本 1.21.11</span>
       <span class="badge badge-link" id="qqBadge" title="点击复制 QQ 群号">BUG 反馈群 249694605</span>
     </div>
   </div>
 </header>
+
+<div class="notice-bar">
+  <div class="notice-inner">
+    <span class="notice-icon">!</span>
+    <span>由于仅在浏览器进行计算，当前经过测试 <b>64×64</b> 为极限大小；为防止崩溃，超过该大小会进入<b>分批计算模式</b>，此模式稳定性不可保证。</span>
+  </div>
+</div>
 
 <main class="layout">
 
@@ -101,13 +108,28 @@
         </select>
       </div>
       <div class="field" id="flatSizeField">
-        <label class="label">地图尺寸（每张 128×128 像素）</label>
-        <div class="size-row">
-          <input type="number" id="mapsX" min="1" max="64" value="1" class="num-input">
+        <label class="label" id="flatSizeLabel">地图尺寸（每张 128×128 像素）</label>
+        <div class="size-row" id="mapSizeRow">
+          <input type="number" id="mapsX" min="1" value="1" class="num-input">
           <span class="times">×</span>
-          <input type="number" id="mapsY" min="1" max="64" value="1" class="num-input">
+          <input type="number" id="mapsY" min="1" value="1" class="num-input">
         </div>
         <p class="hint" id="sizeHint">共 1 张地图，图片将被缩放为 128 × 128</p>
+        <label class="label check-inline" style="margin-top:10px"><input type="checkbox" id="blockSizeToggle"><span class="ck-box"></span><span class="ck-label">按方块尺寸（非地图大小，1 格 = 1 像素）</span></label>
+        <div class="size-row" id="blockSizeRow" hidden style="margin-top:8px">
+          <input type="number" id="blockW" min="1" value="100" class="num-input">
+          <span class="times">×</span>
+          <input type="number" id="blockH" min="1" value="100" class="num-input">
+        </div>
+        <p class="hint" id="blockSizeHint" hidden>输出 100 × 100 方块的地面像素画（非地图尺寸，map.dat 不可用）</p>
+      </div>
+      <div class="field" id="batchSizeField" hidden>
+        <label class="label">每批计算数量（张，分批模式可调）</label>
+        <div class="size-row">
+          <input type="number" id="batchSize" min="1" value="1000" class="num-input">
+          <span class="hint" style="margin:0">张 / 批</span>
+        </div>
+        <p class="hint" id="batchSizeHint">地图总数超过 4096 张时自动分批，每批完成后下载一个 ZIP</p>
       </div>
       <div class="field" id="wallSizeField" hidden>
         <label class="label">墙面尺寸（方块，1 格 = 1 像素）</label>
@@ -192,8 +214,30 @@
         <label class="label">抖动（Dithering）</label>
         <select id="dither"></select>
       </div>
+      <div class="field" id="serpentineField" hidden>
+        <label class="label check-inline"><input type="checkbox" id="serpentine"><span class="ck-box"></span><span class="ck-label">蛇形扫描（误差扩散方向交替，减少伪影）</span></label>
+      </div>
       <div class="field">
-        <label class="label check-inline"><input type="checkbox" id="betterColour" checked><span class="ck-box"></span><span class="ck-label">更好的颜色（Lab 色彩空间匹配）</span></label>
+        <label class="label check-inline"><input type="checkbox" id="gpuAccel"><span class="ck-box"></span><span class="ck-label">GPU 加速（颜色查找表）</span></label>
+        <p class="hint" id="gpuAccelHint">用显卡并行预计算颜色匹配表，大图快数倍；输出结果与 CPU 完全一致，不支持时自动回退</p>
+      </div>
+      <div class="field">
+        <label class="label">颜色匹配（色差公式）</label>
+        <select id="colourMetric">
+          <option value="rgb">RGB 欧氏距离（最快）</option>
+          <option value="lab" selected>Lab 色彩空间（推荐）</option>
+          <option value="ciede2000">CIEDE2000 感知色差（最准，较慢）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label check-inline"><input type="checkbox" id="isolatedCleanup"><span class="ck-box"></span><span class="ck-label">孤立像素抑制（清理单格杂点）</span></label>
+      </div>
+      <div class="field" id="isolatedPassesField" hidden>
+        <label class="label">清理强度</label>
+        <select id="isolatedPasses">
+          <option value="1" selected>1 遍</option>
+          <option value="2">2 遍（更干净）</option>
+        </select>
       </div>
       <div class="field" id="mapdatOpts2">
         <label class="label check-inline"><input type="checkbox" id="mapdatUnobtainable"><span class="ck-box"></span><span class="ck-label">map.dat 使用“不可获得”色阶（unobtainable）</span></label>
@@ -301,6 +345,7 @@
     <div class="gen-progress" id="genProgressWrap" hidden>
       <div class="gen-progress-bar" id="genProgressBar"></div>
     </div>
+    <button type="button" class="btn btn-ghost" id="btnCancelBatch" hidden>取消分批</button>
     <button type="button" class="btn btn-generate" id="btnGenerate">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       <span id="btnGenerateText">生成并下载</span>
@@ -312,9 +357,11 @@
 
 <script src="js/pako.min.js"></script>
 <script src="data/colours.js"></script>
+<script src="data/bluenoise.js"></script>
 <script src="js/constants.js"></script>
 <script src="js/nbt.js"></script>
 <script src="js/zip.js"></script>
+<script src="js/gl-lut.js"></script>
 <script src="js/generator.js"></script>
 <script src="js/app.js"></script>
 </body>

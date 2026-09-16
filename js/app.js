@@ -16,6 +16,7 @@
     layoutMode: "flat", // "flat" | "wall"
     wallW: 100,
     wallH: 100,
+    batchSize: 1000, // maps per batch step in batch mode (adjustable)
     flatBlocksBackup: null, // selectedBlocks saved when entering wall mode
     flatDitherBackup: null, // dither method saved when entering wall mode
     flatNbtModeBackup: null, // NBT file mode saved when entering wall mode
@@ -23,6 +24,10 @@
     solidPreset: null, // computed per-colourSet solid block preset
     mapsX: 1,
     mapsY: 1,
+    blockSizeMode: false, // flat mode: size input is in blocks instead of maps
+    blockW: 100,
+    blockH: 100,
+    flatMapGridBackup: null, // mapsX/mapsY saved when enabling block-size mode
     version: K.SUPPORTED_VERSIONS[K.SUPPORTED_VERSIONS.length - 1].MCVersion,
     formats: { nbt: true, litematic: true, mapdat: false },
     zipMode: "combined",
@@ -41,7 +46,11 @@
     showGrid: true,
     staircase: K.STAIRCASING.CLASSIC.id,
     dither: K.DITHER_METHODS.FloydSteinberg.id,
-    betterColour: true,
+    serpentine: false,
+    colourMetric: "lab",
+    gpuAccel: false,
+    isolatedCleanup: false,
+    isolatedPasses: 1,
     mapdatUnobtainable: false,
     transparentBg: true, // keep PNG transparent areas empty (default on, PNG only)
     transparencyThreshold: 128,
@@ -61,6 +70,7 @@
     previewToken: 0,
     generating: false,
     blockSearch: "",
+    batch: null, // active batch calculation state
   };
 
   /* ---------------- init ---------------- */
@@ -136,6 +146,25 @@
     $("mapdatUseId").checked = state.mapdatUseId;
     $("transparentBg").checked = state.transparentBg;
     $("transparencyThresholdField").hidden = !state.transparentBg;
+    $("colourMetric").value = state.colourMetric;
+    $("batchSize").value = state.batchSize;
+    updateBatchSizeVisibility();
+    $("blockSizeToggle").checked = state.blockSizeMode;
+    $("blockW").value = state.blockW;
+    $("blockH").value = state.blockH;
+    syncBlockSizeUI();
+    $("isolatedCleanup").checked = state.isolatedCleanup;
+    $("isolatedPassesField").hidden = !state.isolatedCleanup;
+    // GPU acceleration availability
+    if (!window.GLLut || !window.GLLut.isSupported()) {
+      state.gpuAccel = false;
+      $("gpuAccel").checked = false;
+      $("gpuAccel").disabled = true;
+      $("gpuAccelHint").textContent = "当前浏览器不支持 WebGL2，已自动使用 CPU 计算";
+    } else {
+      $("gpuAccel").checked = state.gpuAccel;
+    }
+    updateSerpentineVisibility();
     $("toolBadge").textContent = "工具 " + K.TOOL_VERSION;
     updateSizeHint();
     updateGenUI();
@@ -185,18 +214,28 @@
     });
 
     // number inputs
-    $("mapsX").addEventListener("change", (e) => {
-      state.mapsX = clampInt(e.target.value, 1, 64);
-      e.target.value = state.mapsX;
+    $("mapsX").addEventListener("change", (e) => onMapSizeChange("mapsX", e.target));
+    $("mapsY").addEventListener("change", (e) => onMapSizeChange("mapsY", e.target));
+    $("blockSizeToggle").addEventListener("change", (e) => {
+      state.blockSizeMode = e.target.checked;
+      if (state.blockSizeMode) {
+        state.flatMapGridBackup = { x: state.mapsX, y: state.mapsY };
+        syncBlockCells();
+      } else if (state.flatMapGridBackup) {
+        state.mapsX = state.flatMapGridBackup.x;
+        state.mapsY = state.flatMapGridBackup.y;
+        state.flatMapGridBackup = null;
+        $("mapsX").value = state.mapsX;
+        $("mapsY").value = state.mapsY;
+      }
+      syncBlockSizeUI();
+      resetBatch();
       updateSizeHint();
+      updateBatchSizeVisibility();
       schedulePreview();
     });
-    $("mapsY").addEventListener("change", (e) => {
-      state.mapsY = clampInt(e.target.value, 1, 64);
-      e.target.value = state.mapsY;
-      updateSizeHint();
-      schedulePreview();
-    });
+    $("blockW").addEventListener("change", (e) => onBlockSizeChange("blockW", e.target));
+    $("blockH").addEventListener("change", (e) => onBlockSizeChange("blockH", e.target));
     $("wallW").addEventListener("change", (e) => {
       state.wallW = clampInt(e.target.value, 1, 512);
       e.target.value = state.wallW;
@@ -208,6 +247,12 @@
       e.target.value = state.wallH;
       updateSizeHint();
       schedulePreview();
+    });
+    $("batchSize").addEventListener("change", (e) => {
+      state.batchSize = clampInt(e.target.value, 1, 1000000);
+      e.target.value = state.batchSize;
+      resetBatch();
+      updateBatchSizeVisibility();
     });
     $("layoutMode").addEventListener("change", (e) => {
       switchLayoutMode(e.target.value);
@@ -230,6 +275,7 @@
     });
     $("dither").addEventListener("change", (e) => {
       state.dither = parseInt(e.target.value, 10);
+      updateSerpentineVisibility();
       schedulePreview();
     });
     $("supportMode").addEventListener("change", (e) => {
@@ -251,9 +297,23 @@
     bindSlider("saturation", "saturationVal", (v) => v + "%", (v) => (state.saturation = v));
     bindSlider("transparencyThreshold", "transparencyThresholdVal", (v) => v, (v) => (state.transparencyThreshold = v));
 
+    bindCheck("serpentine", (v) => (state.serpentine = v));
+
     // checkboxes
     bindCheck("preprocEnabled", (v) => (state.preprocEnabled = v));
-    bindCheck("betterColour", (v) => (state.betterColour = v));
+    bindCheck("gpuAccel", (v) => (state.gpuAccel = v));
+    bindCheck("isolatedCleanup", (v) => {
+      state.isolatedCleanup = v;
+      $("isolatedPassesField").hidden = !v;
+    });
+    $("colourMetric").addEventListener("change", (e) => {
+      state.colourMetric = e.target.value;
+      schedulePreview();
+    });
+    $("isolatedPasses").addEventListener("change", (e) => {
+      state.isolatedPasses = parseInt(e.target.value, 10);
+      schedulePreview();
+    });
     bindCheck("transparentBg", (v) => {
       state.transparentBg = v;
       $("transparencyThresholdField").hidden = !v;
@@ -369,6 +429,17 @@
     });
 
     $("btnGenerate").addEventListener("click", generate);
+    $("btnCancelBatch").addEventListener("click", () => {
+      resetBatch();
+      toast("已取消分批计算");
+    });
+
+    // keep the preview fitted when the window size changes
+    let resizeTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(fitPreviewCanvas, 120);
+    });
   }
 
   function bindSlider(inputId, valId, format, setter) {
@@ -392,6 +463,67 @@
     v = parseInt(v, 10);
     if (isNaN(v)) v = min;
     return Math.max(min, Math.min(max, v));
+  }
+
+  /* map grid size input: no hard limit; sizes above 64x64 automatically use batch calculation */
+  const BATCH_THRESHOLD_MAPS = 4096; // 64 x 64
+  function onMapSizeChange(dim, inputEl) {
+    const val = clampInt(inputEl.value, 1, Number.MAX_SAFE_INTEGER);
+    state[dim] = val;
+    inputEl.value = val;
+    resetBatch();
+    updateSizeHint();
+    updateBatchSizeVisibility();
+    schedulePreview();
+  }
+
+  function updateBatchSizeVisibility() {
+    $("batchSizeField").hidden = !isBatchMode();
+    if (isBatchMode()) {
+      const cols = Math.max(1, Math.ceil(state.batchSize / state.mapsY));
+      const maps = Math.min(cols * state.mapsY, state.mapsX * state.mapsY);
+      $("batchSizeHint").textContent = `每批约 ${cols} 列地图（竖排，约 ${maps.toLocaleString()} 张），地图总数超过 4096 张时自动分批`;
+    }
+  }
+
+  /* ---------------- block-size mode (flat layout, size given in blocks) ---------------- */
+
+  function isBlockSizeActive() {
+    return state.blockSizeMode && state.layoutMode !== "wall";
+  }
+
+  function onBlockSizeChange(dim, inputEl) {
+    const val = clampInt(inputEl.value, 1, 4096);
+    state[dim] = val;
+    inputEl.value = val;
+    syncBlockCells();
+    resetBatch();
+    updateSizeHint();
+    updateBatchSizeVisibility();
+    schedulePreview();
+  }
+
+  // the artwork spans ceil(blockW/128) x ceil(blockH/128) map-sized cells
+  function syncBlockCells() {
+    if (state.layoutMode === "wall") return;
+    state.mapsX = Math.max(1, Math.ceil(state.blockW / 128));
+    state.mapsY = Math.max(1, Math.ceil(state.blockH / 128));
+  }
+
+  function syncBlockSizeUI() {
+    const on = isBlockSizeActive();
+    $("flatSizeLabel").textContent = on ? "画布尺寸（方块，1 格 = 1 像素）" : "地图尺寸（每张 128×128 像素）";
+    $("mapSizeRow").hidden = on;
+    $("sizeHint").hidden = on;
+    $("blockSizeRow").hidden = !on;
+    $("blockSizeHint").hidden = !on;
+    const hideMapdat = state.layoutMode === "wall" || state.blockSizeMode;
+    $("fmtMapdatLabel").style.display = hideMapdat ? "none" : "";
+    if (hideMapdat && state.formats.mapdat) {
+      state.formats.mapdat = false;
+      $("fmtMapdat").checked = false;
+    }
+    updateMapdatOptsVisibility();
   }
 
   /* ---------------- image loading ---------------- */
@@ -564,11 +696,25 @@
   function updateSizeHint() {
     if (state.layoutMode === "wall") {
       $("wallSizeHint").textContent = `墙面 ${state.wallW} × ${state.wallH} 方块，图片将被缩放为 ${state.wallW} × ${state.wallH}`;
+    } else if (state.blockSizeMode) {
+      $("blockSizeHint").textContent = `输出 ${state.blockW} × ${state.blockH} 方块的地面像素画（非地图尺寸，按 128 网格分区输出，map.dat 不可用）`;
     } else {
       $("sizeHint").textContent = `共 ${state.mapsX * state.mapsY} 张地图，图片将被缩放为 ${state.mapsX * 128} × ${state.mapsY * 128} 像素`;
     }
   }
 
+  // actual artwork size in pixels/blocks
+  function getArtW() {
+    if (state.layoutMode === "wall") return state.wallW;
+    return state.blockSizeMode ? state.blockW : state.mapsX * 128;
+  }
+
+  function getArtH() {
+    if (state.layoutMode === "wall") return state.wallH;
+    return state.blockSizeMode ? state.blockH : state.mapsY * 128;
+  }
+
+  // processing canvas size (block-size mode pads up to the 128 grid; padding stays empty)
   function getTargetW() {
     return state.layoutMode === "wall" ? state.wallW : state.mapsX * 128;
   }
@@ -662,13 +808,9 @@
     $("wallSizeField").hidden = !isWall;
     $("staircaseField").style.display = isWall ? "none" : "";
     $("supportPanel").style.display = isWall ? "none" : "";
-    $("fmtMapdatLabel").style.display = isWall ? "none" : "";
-    if (isWall && state.formats.mapdat) {
-      state.formats.mapdat = false;
-      $("fmtMapdat").checked = false;
-    }
-    updateMapdatOptsVisibility();
     updateSizeHint();
+    syncBlockSizeUI();
+    updateBatchSizeVisibility();
     updateGenUI();
     renderPalette();
     updatePaletteCount();
@@ -690,21 +832,48 @@
   function updateGenUI() {
     const formats = getSelectedFormats();
     const btn = $("btnGenerate");
+    const batchActive = !!state.batch;
     btn.disabled = state.generating || formats.length === 0 || getSelectedBlockCount() === 0;
-    $("btnGenerateText").textContent = state.generating ? "生成中…" : "生成并下载";
+    $("btnGenerateText").textContent = state.generating ? "生成中…" : batchActive ? "计算下一批" : "生成并下载";
+    $("btnCancelBatch").hidden = !batchActive;
     $("genStatus").textContent = state.generating
       ? "正在生成…"
-      : formats.length === 0
-        ? "请选择至少一种输出格式"
-        : getSelectedBlockCount() === 0
-          ? "请先启用至少一个颜色"
-          : "就绪";
+      : batchActive
+        ? `分批计算：已完成 ${state.batch.mapsDone.toLocaleString()} / ${state.batch.totalMaps.toLocaleString()} 张`
+        : formats.length === 0
+          ? "请选择至少一种输出格式"
+          : getSelectedBlockCount() === 0
+            ? "请先启用至少一个颜色"
+            : isBatchMode()
+              ? `共 ${(state.mapsX * state.mapsY).toLocaleString()} 张，将分批计算`
+              : "就绪";
   }
 
   function updateMapdatOptsVisibility() {
-    const mapdatOn = state.formats.mapdat && state.layoutMode !== "wall";
+    const mapdatOn = state.formats.mapdat && state.layoutMode !== "wall" && !state.blockSizeMode;
     $("mapdatOpts2").style.display = mapdatOn ? "" : "none";
     $("mapdatIdStartField").style.display = mapdatOn && state.mapdatUseId ? "" : "none";
+  }
+
+  /* serpentine scanning only applies to error-diffusion dither methods */
+  function isSerpentineApplicable() {
+    return K.ERROR_DIFFUSION_IDS.includes(state.dither);
+  }
+
+  function updateSerpentineVisibility() {
+    $("serpentineField").hidden = !isSerpentineApplicable();
+  }
+
+  /* sizes above 64x64 maps automatically use batch calculation */
+  function isBatchMode() {
+    return state.layoutMode !== "wall" && state.mapsX * state.mapsY > BATCH_THRESHOLD_MAPS;
+  }
+
+  function resetBatch() {
+    if (state.batch) {
+      state.batch = null;
+      updateGenUI();
+    }
   }
 
   /* ---------------- generator / quantization ---------------- */
@@ -717,7 +886,10 @@
       v: state.version,
       s: state.layoutMode === "wall" ? -1 : state.staircase,
       d: state.dither,
-      b: state.betterColour,
+      serp: state.serpentine && isSerpentineApplicable(),
+      cm: state.colourMetric,
+      gpu: state.gpuAccel,
+      ic: state.isolatedCleanup && state.isolatedPasses,
       t: state.transparentBg && isPngImage(),
       tt: state.transparencyThreshold,
       u: state.mapdatUnobtainable,
@@ -725,6 +897,9 @@
       img: state.image ? state.image.src : null,
       mx: state.mapsX,
       my: state.mapsY,
+      bm: state.blockSizeMode,
+      bw: state.blockW,
+      bh: state.blockH,
       crop: state.cropMode,
       zoom: state.cropZoom,
       cx: state.cropX,
@@ -738,36 +913,34 @@
     });
   }
 
-  function newGenerator() {
-    return new MapGenerator(C, {
+  function newGenerator(overrides) {
+    return new MapGenerator(C, Object.assign({
       mcVersion: state.version,
       staircaseId: state.staircase,
       supportModeId: state.supportMode,
       supportBlock: state.supportBlock,
       includeNoobline: state.includeNoobline,
-      betterColour: state.betterColour,
+      colourMetric: state.colourMetric,
+      gpuAccel: state.gpuAccel,
+      isolatedCleanup: state.isolatedCleanup,
+      isolatedPasses: state.isolatedPasses,
       ditherId: state.dither,
       selectedBlocks: state.selectedBlocks,
       transparency: state.transparentBg && isPngImage(),
       transparencyTolerance: state.transparencyThreshold,
       mapdatUnobtainable: state.mapdatUnobtainable,
       wallMode: state.layoutMode === "wall",
-    });
+      serpentine: state.serpentine && isSerpentineApplicable(),
+      artW: isBlockSizeActive() ? state.blockW : 0,
+      artH: isBlockSizeActive() ? state.blockH : 0,
+    }, overrides || {}));
   }
 
-  // prepare source pixels (crop + preprocess)
-  function prepareSourceImage() {
-    const tw = getTargetW();
-    const th = getTargetH();
+  // computes the source rectangle for the current crop settings
+  function getSourceRect(tw, th) {
     const img = state.image;
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = tw;
-    canvas.height = th;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
     let sx, sy, sw, sh;
     if (state.cropMode === K.CROP_MODES.STRETCH.id) {
       sx = 0;
@@ -790,18 +963,38 @@
       sx = (iw - sw) * (state.cropX / 100);
       sy = (ih - sh) * (state.cropY / 100);
     }
-    ctx.imageSmoothingEnabled = !(iw <= tw && ih <= th);
+    return { sx, sy, sw, sh };
+  }
+
+  // prepare source pixels (crop + preprocess)
+  function prepareSourceImage() {
+    const tw = getTargetW();
+    const th = getTargetH();
+    const artW = getArtW();
+    const artH = getArtH();
+    const img = state.image;
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    const rect = getSourceRect(artW, artH);
+    ctx.imageSmoothingEnabled = !(iw <= artW && ih <= artH);
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, tw, th);
+    ctx.drawImage(img, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, artW, artH);
 
     const imageData = ctx.getImageData(0, 0, tw, th);
     if (state.preprocEnabled || state.bgMode !== K.BACKGROUND_MODES.OFF.id) {
-      applyPreprocess(imageData.data);
+      applyPreprocess(imageData.data, tw, { x0: 0, y0: 0, x1: artW, y1: artH });
     }
     return imageData;
   }
 
-  function applyPreprocess(data) {
+  // region: {x0,y0,x1,y1} pixels to process (outside stays untouched); stride = row width
+  function applyPreprocess(data, stride, region) {
     const brightness = state.preprocEnabled ? state.brightness / 100 : 1;
     const contrast = state.preprocEnabled ? state.contrast / 100 : 1;
     const saturation = state.preprocEnabled ? state.saturation / 100 : 1;
@@ -819,6 +1012,11 @@
     const fillTransparent = bg !== K.BACKGROUND_MODES.OFF.id;
 
     for (let i = 0; i < data.length; i += 4) {
+      if (region) {
+        const px = (i / 4) % stride;
+        const py = Math.floor(i / 4 / stride);
+        if (px < region.x0 || px >= region.x1 || py < region.y0 || py >= region.y1) continue;
+      }
       let r = data[i], g = data[i + 1], b = data[i + 2];
       const a = data[i + 3];
       if (fillTransparent && a < 255) {
@@ -866,10 +1064,11 @@
     const cellsX = Math.ceil(W / 128);
     const cellsY = Math.ceil(H / 128);
     const quantized = await gen.processImageData(imageData, cellsX, cellsY, onProgress);
-    const layouts =
+    let layouts =
       state.layoutMode === "wall"
         ? gen.extractColoursLayoutWall(imageData.data, W, H)
-        : gen.extractColoursLayouts(imageData.data, state.mapsX, state.mapsY);
+        : gen.extractColoursLayouts(imageData.data, cellsX, cellsY);
+    if (isBlockSizeActive()) layouts = gen.cropColoursLayouts(layouts, getArtW(), getArtH());
     state.gen = gen;
     state.genSignature = signature;
     state.quantized = { pixels: imageData.data, maps: quantized.maps };
@@ -881,6 +1080,7 @@
 
   let previewTimer = null;
   function schedulePreview() {
+    resetBatch(); // changing settings invalidates an in-progress batch
     clearTimeout(previewTimer);
     previewTimer = setTimeout(refreshPreview, 250);
   }
@@ -888,6 +1088,21 @@
   async function refreshPreview() {
     if (!state.image) return;
     const token = ++state.previewToken;
+    // batch mode: the full image cannot be quantized for preview (memory), show the source instead
+    if (isBatchMode()) {
+      state.viewMode = "source";
+      document.querySelectorAll("#viewSeg .seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.view === "source"));
+      drawPreview();
+      $("previewInfo").textContent = isBlockSizeActive()
+        ? `方块尺寸 ${state.blockW}×${state.blockH} · 分批计算模式（预览显示原图）`
+        : `共 ${(state.mapsX * state.mapsY).toLocaleString()} 张地图 · 分批计算模式（预览显示原图）`;
+      $("previewSize").textContent = `原图 ${state.image.naturalWidth}×${state.image.naturalHeight}`;
+      renderStats(null);
+      $("statsEmpty").hidden = false;
+      $("statsEmpty").textContent = "分批计算模式：材料统计在每批计算时生成";
+      updateGenUI();
+      return;
+    }
     $("genStatus").textContent = "正在计算…";
     try {
       const { quantized } = await ensureQuantization(() => {});
@@ -896,6 +1111,8 @@
       updateStats();
       if (state.layoutMode === "wall") {
         $("previewInfo").textContent = `墙面 ${state.wallW}×${state.wallH} 方块 · 立式模式 · 已启用 ${getSelectedBlockCount()}/61 色`;
+      } else if (state.blockSizeMode) {
+        $("previewInfo").textContent = `方块尺寸 ${state.blockW}×${state.blockH} · 非地图尺寸模式 · 已启用 ${getSelectedBlockCount()}/61 色`;
       } else {
         $("previewInfo").textContent = `分辨率 ${state.mapsX * 128}×${state.mapsY * 128} · 地图 ${state.mapsX}×${state.mapsY} · 已启用 ${getSelectedBlockCount()}/61 色`;
       }
@@ -907,9 +1124,27 @@
     }
   }
 
-  function drawPreview() {
+  // scales the canvas to fill the available width, but caps it so the whole preview
+  // panel stays visible without scrolling (aspect ratio preserved)
+  function fitPreviewCanvas() {
     const canvas = $("preview");
     const wrap = $("canvasWrap");
+    if (!canvas.width || !canvas.height) return;
+    const availW = Math.max(64, wrap.clientWidth);
+    const availH = Math.max(200, window.innerHeight - 330);
+    const ar = canvas.width / canvas.height;
+    let w = availW;
+    let h = w / ar;
+    if (h > availH) {
+      h = availH;
+      w = h * ar;
+    }
+    canvas.style.width = Math.round(w) + "px";
+    canvas.style.height = Math.round(h) + "px";
+  }
+
+  function drawPreview() {
+    const canvas = $("preview");
     if (state.viewMode === "source" && state.image) {
       const img = state.image;
       canvas.width = img.naturalWidth;
@@ -917,6 +1152,7 @@
       const ctx = canvas.getContext("2d");
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, 0, 0);
+      fitPreviewCanvas();
       $("canvasEmpty").hidden = true;
       return;
     }
@@ -926,31 +1162,34 @@
     }
     const tw = getTargetW();
     const th = getTargetH();
-    canvas.width = tw;
-    canvas.height = th;
+    const artW = getArtW();
+    const artH = getArtH();
+    canvas.width = artW;
+    canvas.height = artH;
     const ctx = canvas.getContext("2d");
     const imgData = new ImageData(new Uint8ClampedArray(state.quantized.pixels), tw, th);
-    ctx.putImageData(imgData, 0, 0);
+    ctx.putImageData(imgData, 0, 0, 0, 0, artW, artH);
 
     if (state.showGrid) {
       ctx.strokeStyle = "rgba(255,255,255,0.35)";
       ctx.lineWidth = 1;
-      const cellsX = Math.ceil(tw / 128);
-      const cellsY = Math.ceil(th / 128);
+      const cellsX = Math.ceil(artW / 128);
+      const cellsY = Math.ceil(artH / 128);
       for (let x = 1; x < cellsX; x++) {
         ctx.beginPath();
         ctx.moveTo(x * 128 + 0.5, 0);
-        ctx.lineTo(x * 128 + 0.5, th);
+        ctx.lineTo(x * 128 + 0.5, artH);
         ctx.stroke();
       }
       for (let y = 1; y < cellsY; y++) {
         ctx.beginPath();
         ctx.moveTo(0, y * 128 + 0.5);
-        ctx.lineTo(tw, y * 128 + 0.5);
+        ctx.lineTo(artW, y * 128 + 0.5);
         ctx.stroke();
       }
     }
     $("canvasEmpty").hidden = true;
+    fitPreviewCanvas();
   }
 
   /* ---------------- stats ---------------- */
@@ -1103,6 +1342,8 @@
     if (formats.length === 0) return toast("请至少选择一种输出格式", true);
     if (getSelectedBlockCount() === 0) return toast("请先启用至少一个颜色（方块选择）", true);
 
+    if (isBatchMode()) return generateBatchStep(formats);
+
     state.generating = true;
     updateGenUI();
     $("genProgressWrap").hidden = false;
@@ -1148,10 +1389,11 @@
           const bytes = gen.buildSchematicNbtMerged(layouts, "MapArt Generator");
           files.push({ name: `${folder}/${baseName}.nbt`, data: bytes });
         } else {
+          const partPrefix = state.blockSizeMode ? "part" : "map";
           for (let my = 0; my < state.mapsY; my++) {
             for (let mx = 0; mx < state.mapsX; mx++) {
               const bytes = gen.buildSchematicNbt(layouts[my][mx].coloursLayout, "MapArt Generator");
-              files.push({ name: `${folder}/map_${mx}_${my}.nbt`, data: bytes });
+              files.push({ name: `${folder}/${partPrefix}_${mx}_${my}.nbt`, data: bytes });
             }
           }
         }
@@ -1180,11 +1422,12 @@
             files.push({ name: `${folder}/${baseName}.litematic`, data: bytes });
           }
         } else if (state.litematicMode === "split") {
+          const partPrefix = state.blockSizeMode ? "part" : "map";
           for (let my = 0; my < state.mapsY; my++) {
             for (let mx = 0; mx < state.mapsX; mx++) {
               const single = [[layouts[my][mx]]];
-              const bytes = gen.buildLitematicBytes(single, `${baseName}_map_${mx}_${my}`, "MapArt Generator");
-              files.push({ name: `${folder}/${baseName}_map_${mx}_${my}.litematic`, data: bytes });
+              const bytes = gen.buildLitematicBytes(single, `${baseName}_${partPrefix}_${mx}_${my}`, "MapArt Generator");
+              files.push({ name: `${folder}/${baseName}_${partPrefix}_${mx}_${my}.litematic`, data: bytes });
             }
           }
         } else {
@@ -1195,7 +1438,7 @@
         setProgress(step);
       }
 
-      if (formats.includes("mapdat") && state.layoutMode !== "wall") {
+      if (formats.includes("mapdat") && state.layoutMode !== "wall" && !state.blockSizeMode) {
         setStatus("正在生成 MapData (map.dat)…");
         await yieldToUI();
         const folder = K.OUTPUT_FORMATS.MAPDAT.folder;
@@ -1250,6 +1493,211 @@
     }
   }
 
+  /* ---------------- batch calculation (maps > 64x64, vertical map-column strips) ---------------- */
+
+  async function generateBatchStep(formats) {
+    const totalMaps = state.mapsX * state.mapsY;
+
+    if (!state.batch) {
+      // first step: initialise and inform the user
+      const colsPerBatch = Math.max(1, Math.ceil(state.batchSize / state.mapsY));
+      alert(
+        "图片内容过大（" +
+          state.mapsX +
+          " × " +
+          state.mapsY +
+          " = " +
+          totalMaps.toLocaleString() +
+          " 张地图，超过 64×64），已自动启用分批计算模式。\n\n" +
+          "按地图列（竖排）分批，每批约 " +
+          colsPerBatch +
+          " 列 / " +
+          Math.min(colsPerBatch * state.mapsY, totalMaps).toLocaleString() +
+          " 张（可在设置里调整），每批完成后会自动下载该批的 ZIP 压缩包。\n" +
+          "点击「计算下一批」按钮继续计算下一部分，直到全部完成。"
+      );
+      const gen = newGenerator(isBatchMode() ? { serpentine: false } : null);
+      gen.setup();
+      let litematicState = null;
+      let mergedSkipped = false;
+      if (formats.includes("litematic") && state.litematicMode === "merged") {
+        if (state.staircase === K.STAIRCASING.OFF.id) {
+          litematicState = gen.initLitematicBatch(state.mapsX, state.mapsY);
+        } else {
+          mergedSkipped = true;
+        }
+      }
+      state.batch = {
+        gen,
+        formats,
+        mapsDone: 0,
+        totalMaps,
+        batchNo: 0,
+        startCol: 0,
+        rowCarry: null,
+        colCarry: null, // 2 extra columns x full height x RGBA, carried across batches
+        litematicState,
+        baseName: getBaseName(),
+      };
+      if (mergedSkipped) toast("分批模式下合并 litematic 仅支持平面模式，本次已跳过该文件", true);
+      if (state.isolatedCleanup) toast("分批模式下已忽略孤立像素抑制");
+      if (state.serpentine && isSerpentineApplicable()) toast("分批模式下已忽略蛇形扫描（保证与整体计算一致）");
+      if (K.ERROR_DIFFUSION_IDS.includes(state.dither)) {
+        toast("提示：误差扩散类算法在分批交界处会有极轻微的图案差异，追求完全一致可换用「蓝噪声」等有序算法", true);
+      }
+    }
+
+    state.generating = true;
+    updateGenUI();
+    $("genProgressWrap").hidden = false;
+
+    try {
+      const batch = state.batch;
+      const mapsY = state.mapsY;
+      const colsPerBatch = Math.max(1, Math.ceil(state.batchSize / mapsY));
+      const remainingCols = state.mapsX - batch.startCol;
+      const colsThisBatch = Math.min(colsPerBatch, remainingCols);
+      const outPixels = colsThisBatch * 128;
+      const processWidth = outPixels; // process exactly this batch's columns
+      const bufferWidth = outPixels + 2; // 2 extra columns only receive the error state for the next batch
+      const carryCols = 2;
+      const carryStart = outPixels; // the 2 pending-error columns are the next batch's first 2 columns
+      const files = [];
+
+      batch.batchNo++;
+      setStatus(`正在计算第 ${batch.batchNo} 批（${colsThisBatch} 列地图）…`);
+
+      let rowCarry = null; // row carry is only used within a batch
+      const colCarry = batch.colCarry; // carry from the previous batch (first 2 columns' state)
+      const newColCarry = new Uint8ClampedArray(carryCols * mapsY * 128 * 4);
+
+      for (let mapRow = 0; mapRow < mapsY; mapRow++) {
+        const bandH = 130;
+        const band = drawSourceBandRange(batch.startCol * 128, bufferWidth, mapRow * 128, bandH);
+        const bandData = band.data;
+
+        // apply the carried errors (row carry for the first two rows, column carry for the rest)
+        batch.gen.applyBandCarries(bandData, bufferWidth, mapRow, rowCarry, colCarry, carryCols);
+
+        const res = await batch.gen.processImageBand(band, mapRow, colsThisBatch, rowCarry, (p) => {
+          const done = batch.mapsDone + colsThisBatch * (mapRow + p);
+          setProgress(Math.min(0.99, done / batch.totalMaps));
+        }, { processOffset: 0, processWidth, globalXOffset: batch.startCol * 128 });
+        rowCarry = res.carry;
+
+        // store this band's contribution to the column carry (the 2 pending-error columns)
+        batch.gen.storeColumnCarry(bandData, bufferWidth, mapRow, newColCarry, carryCols, carryStart);
+
+        const bandLayouts = batch.gen.extractColoursLayoutsBand(bandData, bufferWidth, colsThisBatch, 0);
+        // block-size mode: crop each cell to the actual artwork bounds
+        const artW = getArtW();
+        const artH = getArtH();
+        const partPrefix = state.blockSizeMode ? "part" : "map";
+        const layouts = [];
+        for (let c = 0; c < colsThisBatch; c++) {
+          const cw = Math.max(0, Math.min(128, artW - (batch.startCol + c) * 128));
+          const ch = Math.max(0, Math.min(128, artH - mapRow * 128));
+          layouts.push(cw >= 128 && ch >= 128 ? bandLayouts[c] : batch.gen.cropColoursLayout(bandLayouts[c], cw, ch));
+        }
+
+        for (let c = 0; c < colsThisBatch; c++) {
+          const mx = batch.startCol + c;
+          const my = mapRow;
+          const layout = layouts[c];
+          if (formats.includes("nbt")) {
+            const bytes = batch.gen.buildSchematicNbt(layout, "MapArt Generator");
+            files.push({ name: `Schematic-NBT/${partPrefix}_${mx}_${my}.nbt`, data: bytes });
+          }
+          if (formats.includes("litematic") && !batch.litematicState) {
+            const bytes = batch.gen.buildLitematicBytes([[{ coloursLayout: layout }]], `${batch.baseName}_${partPrefix}_${mx}_${my}`, "MapArt Generator");
+            files.push({ name: `Litematic/${batch.baseName}_${partPrefix}_${mx}_${my}.litematic`, data: bytes });
+          }
+          if (formats.includes("mapdat")) {
+            const bytes = batch.gen.buildMapdatBytes(layout);
+            const id = state.mapdatIdStart + my * state.mapsX + mx;
+            files.push({ name: `MapData/map_${id}.dat`, data: bytes });
+          }
+        }
+        if (batch.litematicState) {
+          batch.gen.addLitematicBatchRow(batch.litematicState, layouts, mapRow, batch.startCol);
+        }
+        batch.mapsDone += colsThisBatch;
+        setProgress(Math.min(0.99, batch.mapsDone / batch.totalMaps));
+      }
+
+      batch.colCarry = batch.gen.isErrorDiffusionDither() ? newColCarry : null;
+      batch.startCol += colsThisBatch;
+
+      const isFinal = batch.startCol >= state.mapsX;
+      if (isFinal && batch.litematicState) {
+        const bytes = batch.gen.finishLitematicBatch(batch.litematicState, batch.baseName, "MapArt Generator");
+        files.push({ name: `Litematic/${batch.baseName}.litematic`, data: bytes });
+      }
+
+      files.push({ name: "使用说明.txt", data: buildReadme(formats, batch.baseName) });
+
+      setStatus("正在打包 ZIP…");
+      await yieldToUI();
+      const zip = new ZipWriter();
+      for (const f of files) zip.addFile(f.name, f.data);
+      if (isFinal) {
+        downloadBlob(zip.toBlob(), `${batch.baseName}_地图画_第${batch.batchNo}批_完成.zip`);
+        setProgress(1);
+        toast(`全部计算完成！共 ${batch.batchNo} 批，${batch.totalMaps.toLocaleString()} 张地图`);
+        state.batch = null;
+      } else {
+        downloadBlob(zip.toBlob(), `${batch.baseName}_地图画_第${batch.batchNo}批.zip`);
+        toast(`第 ${batch.batchNo} 批完成（${batch.mapsDone.toLocaleString()} / ${batch.totalMaps.toLocaleString()} 张），点击「计算下一批」继续`);
+      }
+    } catch (e) {
+      console.error(e);
+      toast("分批计算失败：" + e.message, true);
+      resetBatch();
+    } finally {
+      state.generating = false;
+      updateGenUI();
+      setTimeout(() => {
+        $("genProgressWrap").hidden = true;
+      }, 1500);
+    }
+  }
+
+  // draws a band of the source image: columns [srcColStart, srcColStart + widthPx) and rows [rowStart, rowStart + heightPx)
+  function drawSourceBandRange(srcColStart, widthPx, rowStart, heightPx) {
+    const artW = getArtW();
+    const artH = getArtH();
+    const canvas = document.createElement("canvas");
+    canvas.width = widthPx;
+    canvas.height = heightPx;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const img = state.image;
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+
+    // intersection of the band with the artwork (everything outside stays empty)
+    const x0 = Math.max(0, -srcColStart);
+    const x1 = Math.min(widthPx, artW - srcColStart);
+    const y0 = Math.max(0, -rowStart);
+    const y1 = Math.min(heightPx, artH - rowStart);
+
+    if (x1 > x0 && y1 > y0) {
+      const rect = getSourceRect(artW, artH);
+      const sx = rect.sx + ((srcColStart + x0) / artW) * rect.sw;
+      const sy = rect.sy + ((rowStart + y0) / artH) * rect.sh;
+      const sw = ((x1 - x0) / artW) * rect.sw;
+      const sh = ((y1 - y0) / artH) * rect.sh;
+      ctx.imageSmoothingEnabled = !(iw <= artW && ih <= artH);
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, sx, sy, sw, sh, x0, y0, x1 - x0, y1 - y0);
+    }
+
+    const imageData = ctx.getImageData(0, 0, widthPx, heightPx);
+    if (state.preprocEnabled || state.bgMode !== K.BACKGROUND_MODES.OFF.id) {
+      applyPreprocess(imageData.data, widthPx, { x0, y0, x1, y1 });
+    }
+    return imageData;
+  }
+
   function buildReadme(formats, baseName) {
     const lines = [];
     const isWall = state.layoutMode === "wall";
@@ -1263,13 +1711,20 @@
       lines.push(`  墙面尺寸: ${state.wallW} × ${state.wallH} 方块（1 格 = 1 像素，厚 1 格）`);
       lines.push(`  说明: 图片顶部在墙的最上方，墙的底边在 y=0，朝南（+Z）方向观看`);
     } else {
-      lines.push(`  布局模式: 平铺（地面地图画）`);
-      lines.push(`  地图网格: ${state.mapsX} × ${state.mapsY} 张 (${state.mapsX * 128} × ${state.mapsY * 128} 像素)`);
+      if (state.blockSizeMode) {
+        lines.push(`  布局模式: 平铺（地面像素画，非地图尺寸）`);
+        lines.push(`  画布尺寸: ${state.blockW} × ${state.blockH} 方块（1 格 = 1 像素）`);
+      } else {
+        lines.push(`  布局模式: 平铺（地面地图画）`);
+        lines.push(`  地图网格: ${state.mapsX} × ${state.mapsY} 张 (${state.mapsX * 128} × ${state.mapsY * 128} 像素)`);
+      }
       lines.push(`  3D 模式: ${Object.values(K.STAIRCASING).find((m) => m.id === state.staircase).name}`);
       lines.push(`  支撑方块模式: ${Object.values(K.SUPPORT_MODES).find((m) => m.id === state.supportMode).name}`);
       lines.push(`  对齐行(noobline): ${state.includeNoobline ? "包含" : "不包含"}`);
     }
     lines.push(`  抖动: ${Object.values(K.DITHER_METHODS).find((m) => m.id === state.dither).name}`);
+    lines.push(`  颜色匹配: ${state.colourMetric === "rgb" ? "RGB 欧氏距离" : state.colourMetric === "lab" ? "Lab 色彩空间" : "CIEDE2000 感知色差"}`);
+    lines.push(`  孤立像素抑制: ${state.isolatedCleanup ? "开（" + state.isolatedPasses + " 遍）" : "关"}`);
     lines.push(`  透明背景: ${state.transparentBg ? "开" : "关"}${isPngImage() ? "（PNG 生效）" : "（当前图片不是 PNG）"}`);
     lines.push(`  已启用颜色: ${getSelectedBlockCount()} 种`);
     lines.push("");
@@ -1286,6 +1741,11 @@
         lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
       } else if (state.nbtMode === "merged") {
         lines.push(`  [Schematic-NBT/] 整幅地图画一个 .nbt 文件（${baseName}.nbt）`);
+        lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
+        lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
+        lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
+      } else if (state.blockSizeMode) {
+        lines.push(`  [Schematic-NBT/] 按 128×128 分区，每区一个 .nbt 文件（part_x_y.nbt）`);
         lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
         lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
@@ -1306,6 +1766,10 @@
           lines.push(`  [Litematic/] 整面墙一个 .litematic 文件（Litematica 模组专用格式）`);
           lines.push(`    - 放入 .minecraft/schematics/ 文件夹，游戏内按 M 打开加载`);
         }
+      } else if (state.blockSizeMode) {
+        lines.push(`  [Litematic/] 按 128×128 分区，每区一个 .litematic 文件`);
+        lines.push(`    - 文件名 ${baseName}_part_x_y.litematic，x 为横向、y 为纵向序号`);
+        lines.push(`    - 放入 .minecraft/schematics/ 文件夹，游戏内按 M 打开加载`);
       } else if (state.litematicMode === "split") {
         lines.push(`  [Litematic/] 每张地图一个 .litematic 文件（Litematica 模组专用格式）`);
         lines.push(`    - 共 ${state.mapsX * state.mapsY} 个文件，文件名 ${baseName}_map_x_y.litematic，x 为横向、y 为纵向序号`);
@@ -1328,12 +1792,21 @@
       lines.push("  - 立式模式生成的是一堵 1 格厚的竖墙，直接观看，不用于地图");
       lines.push("  - 方块已限制为可贴在墙上的固体方块（沙子等重力方块在墙内有下方支撑不会掉落）");
       lines.push("  - 建议选一块平整地面放置，墙的底边落在 y=0");
+    } else if (state.blockSizeMode) {
+      lines.push("  - 本作品为非地图尺寸的地面像素画，不受 128×128 网格对齐限制");
+      lines.push("  - 图片会缩放为输入的方块尺寸，按 128×128 分区输出文件，边缘不足一格的部分不会生成");
+      lines.push("  - 该模式不支持 map.dat 输出；如需地图画请关闭“按方块尺寸”开关");
     } else {
       lines.push("  - 地图画在游戏中固定对齐 128×128 网格，地图以北为正上方");
       lines.push("  - 无支撑时仅生成画面方块，可直接粘贴在平整地面上");
       lines.push("  - 开启“包含北侧对齐行”可帮助地图精确对齐，生成后需手动拆掉");
     }
     lines.push("");
+    if (isBatchMode()) {
+      lines.push("注意：本次为分批计算模式（地图数超过 64×64），文件按批打包下载，");
+      lines.push("      所有批次的文件合起来才是完整作品（文件名均为正常命名）。");
+      lines.push("");
+    }
     lines.push("问题反馈：QQ 群 249694605");
     return new TextEncoder().encode(lines.join("\r\n"));
   }

@@ -11,7 +11,7 @@
 ## 功能特性
 
 - **两种布局模式**
-  - **平铺（地面地图画）**：经典地图画，配合地图使用
+  - **平铺（地面地图画）**：经典地图画，配合地图使用；可勾选「按方块尺寸」改用任意方块尺寸（1 格 = 1 像素，默认 100×100），不受 128 网格限制
   - **立式（墙面像素画）**：生成一堵 1 格厚的竖墙（图片顶部在最上方），直接观看，尺寸按方块自由设定（默认 100×100），自动切换为固体方块预设并禁用不能上墙的方块
 - **三种输出格式，任意组合**
   - `Schematic (.nbt)`：Schematica / Litematica / WorldEdit / Baritone 均可加载
@@ -21,11 +21,15 @@
 - **默认只生成画面部分**：不包含任何支撑方块；支撑模式（无 / 仅必需方块 / 全部优化 / 双层）和对齐行（noobline）可自由开关
 - **高还原度渲染**：完整移植自 [mapartcraft](https://github.com/rebane2001/mapartcraft) 的颜色量化与布局算法
   - 61 种地图色系，每种可单独选择方块（羊毛、地毯、混凝土、玻璃等）
-  - 10 种抖动算法（Floyd-Steinberg、Bayer、Atkinson 等）
-  - Lab 色彩空间匹配（"更好的颜色"）
+  - 15 种抖动算法：无 / Floyd-Steinberg / Bayer 2×2/4×4/8×8 / Ordered 3×3 / MinAvgErr / Burkes / Sierra-Lite / Stucki / Atkinson / **蓝噪声** / **Yliluoma 有序** / **蓝噪声 · Yliluoma** / **Riemersma（希尔伯特曲线）**
+  - 误差扩散类算法支持**蛇形扫描**开关（减少方向性伪影）
+  - **孤立像素抑制**：可选清理抖动产生的单格杂点（1/2 遍）
+  - 色差公式三档：RGB 欧氏距离 / Lab 色彩空间 / **CIEDE2000 感知色差**
   - 5 种 3D 阶梯模式（平面 / 经典 / 山谷 / 全暗 / 全亮）
 - **图片预处理**：亮度 / 对比度 / 饱和度 / 背景色填充，拉伸 / 居中 / 手动裁剪
 - **透明背景**（默认开启，仅 PNG 生效）：透明区域不放置方块——墙面镂空、地面地图画透出下方地形、map.dat 输出为透明像素
+- **分批计算**：地图数量超过 64×64（4096 张）时自动启用，按**地图列（竖排）**分批、逐批输出 ZIP（文件名连续），内存占用极小；有序类算法（无/Bayer/蓝噪声/Yliluoma）分批结果与一次性计算完全一致，误差扩散类在批次交界处会有极轻微的图案差异（算法特性），可在设置里调整每批数量
+- **GPU 加速**（可选，默认关闭）：用 WebGL2 并行预计算 256³ 颜色查找表，颜色匹配变为 O(1) 查表，实测大图提速 15~20 倍、CIEDE2000 提速数百倍；结果与 CPU 逐像素完全一致，不支持 WebGL2 时自动回退
 - **游戏版本支持 1.12.2 → 1.21.11**（DataVersion 逐一核验自 Mojang 官方客户端）
 - **材料统计**：每种方块用量、组数、潜影盒数量一目了然
 - 中文界面，明暗主题，支持拖拽 / 粘贴 / 点击上传
@@ -47,7 +51,9 @@
 ```
 ├── index.html          主页面
 ├── css/style.css       样式
-├── data/colours.js     Minecraft 61 种地图色数据
+├── data/
+│   ├── colours.js      Minecraft 61 种地图色数据
+│   └── bluenoise.js    64×64 蓝噪声抖动掩模（由 build/bluenoise.js 生成）
 ├── js/
 │   ├── app.js          UI 逻辑
 │   ├── generator.js    核心引擎（颜色匹配/抖动/阶梯/布局/文件生成）
@@ -56,7 +62,9 @@
 │   ├── constants.js    常量与版本数据
 │   └── pako.min.js     gzip 压缩库（MIT）
 ├── test/test.js        自动化测试（node test/test.js）
-└── build/bundle.js     打包单文件版脚本（node build/bundle.js）
+└── build/
+    ├── bundle.js       打包单文件版脚本（node build/bundle.js）
+    └── bluenoise.js    重新生成蓝噪声掩模（node build/bluenoise.js）
 ```
 
 ## 技术说明

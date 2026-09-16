@@ -8,6 +8,7 @@ const zlib = require("zlib");
 const ROOT = path.join(__dirname, "..");
 global.window = {};
 require(path.join(ROOT, "data", "colours.js"));
+require(path.join(ROOT, "data", "bluenoise.js"));
 require(path.join(ROOT, "js", "constants.js"));
 require(path.join(ROOT, "js", "nbt.js"));
 require(path.join(ROOT, "js", "zip.js"));
@@ -741,6 +742,419 @@ function expandLongPackedArray(bytes, bitsPerItem, length) {
   let empty22b = 0;
   for (let x = 0; x < 128; x++) for (let z = 0; z < 128; z++) if (l22b[0][0].coloursLayout[x][z].colourSetId === "-1") empty22b++;
   assert(empty22b === 0, "with option off, no empty cells (old black behaviour)");
+
+  console.log("=== Test 23: blue noise mask ===");
+  const bn = K.getBlueNoiseMask();
+  assert(bn && bn.size === 64, "blue noise mask decoded, size 64");
+  let minV = 255, maxV = 0;
+  for (const row of bn.matrix) for (const v of row) { if (v < minV) minV = v; if (v > maxV) maxV = v; }
+  assert(minV === 0 && maxV === 255, "mask value range 0..255 (got " + minV + ".." + maxV + ")");
+  let localDev = 0;
+  for (let y = 0; y < 64; y++) {
+    for (let x = 0; x < 64; x++) {
+      let s = 0;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) s += bn.matrix[(y + dy + 64) % 64][(x + dx + 64) % 64];
+      localDev += Math.abs(s / 25 - 127.5);
+    }
+  }
+  const devAvg = localDev / 4096;
+  assert(devAvg < 8, "blue noise local deviation low, " + devAvg.toFixed(1) + " < 8 (white noise would be ~12)");
+
+  console.log("=== Test 24: new dither algorithms ===");
+  const ditherMethodsToTest = [
+    [K.DITHER_METHODS.Bayer88.id, "Bayer 8x8", false],
+    [K.DITHER_METHODS.BlueNoise.id, "Blue Noise", false],
+    [K.DITHER_METHODS.Yliluoma.id, "Yliluoma", false],
+    [K.DITHER_METHODS.Riemersma.id, "Riemersma", false],
+    [K.DITHER_METHODS.FloydSteinberg.id, "Floyd-Steinberg + serpentine", true],
+  ];
+  const W24 = 64, H24 = 64;
+  const src24 = new Uint8ClampedArray(W24 * H24 * 4);
+  for (let y = 0; y < H24; y++) {
+    for (let x = 0; x < W24; x++) {
+      const i = (y * W24 + x) * 4;
+      src24[i] = Math.floor((x / W24) * 255);
+      src24[i + 1] = Math.floor((y / H24) * 255);
+      src24[i + 2] = 128;
+      src24[i + 3] = 255;
+    }
+  }
+  const ditherOutputs = {};
+  for (const [id, name, serp] of ditherMethodsToTest) {
+    const g = makeGenerator({ ditherId: id, serpentine: serp, staircaseId: K.STAIRCASING.CLASSIC.id });
+    g.setup();
+    const data = new Uint8ClampedArray(src24);
+    const res = await g.processImageData({ data, width: W24 }, 1, 1);
+    let invalid = 0;
+    let errSum = 0;
+    for (let p = 0; p < W24 * H24; p++) {
+      const i = p * 4;
+      const cs = g.exactRGBToColourSetIdAndTone([data[i], data[i + 1], data[i + 2]]);
+      if (!cs || cs.colourSetId === "-1") invalid++;
+      errSum += Math.abs(data[i] - src24[i]) + Math.abs(data[i + 1] - src24[i + 1]) + Math.abs(data[i + 2] - src24[i + 2]);
+    }
+    const materialsTotal = Object.values(res.maps[0][0].materials).reduce((a, b) => a + b, 0);
+    assert(invalid === 0, name + ": all pixels map to palette colours (invalid=" + invalid + ")");
+    assert(materialsTotal === W24 * H24, name + ": materials total " + W24 * H24 + " (got " + materialsTotal + ")");
+    // dithering quality: the average colour of an 8x8 block should be close to the source block average
+    let blockErr = 0;
+    let blocks = 0;
+    for (let by = 0; by < H24; by += 8) {
+      for (let bx = 0; bx < W24; bx += 8) {
+        let sr = 0, sg = 0, sb = 0, qr = 0, qg = 0, qb = 0;
+        for (let y = by; y < by + 8; y++) {
+          for (let x = bx; x < bx + 8; x++) {
+            const i = (y * W24 + x) * 4;
+            sr += src24[i]; sg += src24[i + 1]; sb += src24[i + 2];
+            qr += data[i]; qg += data[i + 1]; qb += data[i + 2];
+          }
+        }
+        blockErr += (Math.abs(qr - sr) + Math.abs(qg - sg) + Math.abs(qb - sb)) / 64;
+        blocks++;
+      }
+    }
+    const meanBlockErr = blockErr / (blocks * 3);
+    // ordered dithering is limited by palette granularity; error diffusion is much more accurate
+    let limit = 17.0;
+    if (id === K.DITHER_METHODS.Yliluoma.id) limit = 15;
+    if (id === K.DITHER_METHODS.Riemersma.id || serp) limit = 10;
+    assert(meanBlockErr < limit, name + ": mean block-average error " + meanBlockErr.toFixed(1) + " < " + limit + " (no-dither baseline ~17.1)");
+    ditherOutputs[id + (serp ? "-serp" : "")] = data;
+  }
+
+  console.log("=== Test 25: serpentine changes error-diffusion output ===");
+  const gPlain = makeGenerator({ ditherId: K.DITHER_METHODS.FloydSteinberg.id, serpentine: false, staircaseId: K.STAIRCASING.CLASSIC.id });
+  gPlain.setup();
+  const dataPlain = new Uint8ClampedArray(src24);
+  await gPlain.processImageData({ data: dataPlain, width: W24 }, 1, 1);
+  const dataSerp = ditherOutputs[K.DITHER_METHODS.FloydSteinberg.id + "-serp"];
+  let diffPixels = 0;
+  for (let p = 0; p < W24 * H24; p++) {
+    if (dataPlain[p * 4] !== dataSerp[p * 4] || dataPlain[p * 4 + 1] !== dataSerp[p * 4 + 1] || dataPlain[p * 4 + 2] !== dataSerp[p * 4 + 2]) diffPixels++;
+  }
+  assert(diffPixels > 100, "serpentine produces a different pattern (" + diffPixels + " pixels differ)");
+
+  console.log("=== Test 26: blue noise + Yliluoma hybrid ===");
+  const g26a = makeGenerator({ ditherId: K.DITHER_METHODS.Yliluoma.id, staircaseId: K.STAIRCASING.CLASSIC.id });
+  g26a.setup();
+  const data26a = new Uint8ClampedArray(src24);
+  await g26a.processImageData({ data: data26a, width: W24 }, 1, 1);
+  const g26b = makeGenerator({ ditherId: K.DITHER_METHODS.BlueNoiseYliluoma.id, staircaseId: K.STAIRCASING.CLASSIC.id });
+  g26b.setup();
+  const data26b = new Uint8ClampedArray(src24);
+  const res26b = await g26b.processImageData({ data: data26b, width: W24 }, 1, 1);
+  let invalid26 = 0;
+  let diff26 = 0;
+  for (let p = 0; p < W24 * H24; p++) {
+    const i = p * 4;
+    const cs = g26b.exactRGBToColourSetIdAndTone([data26b[i], data26b[i + 1], data26b[i + 2]]);
+    if (!cs || cs.colourSetId === "-1") invalid26++;
+    if (data26a[i] !== data26b[i] || data26a[i + 1] !== data26b[i + 1]) diff26++;
+  }
+  const materials26 = Object.values(res26b.maps[0][0].materials).reduce((a, b) => a + b, 0);
+  assert(invalid26 === 0, "hybrid: all pixels valid (invalid=" + invalid26 + ")");
+  assert(materials26 === W24 * H24, "hybrid: materials total correct (" + materials26 + ")");
+  assert(diff26 > 100, "hybrid differs from Bayer-based Yliluoma (" + diff26 + " pixels)");
+
+  console.log("=== Test 27: CIEDE2000 colour metric ===");
+  const g27 = makeGenerator({ ditherId: K.DITHER_METHODS.None.id, colourMetric: "ciede2000", staircaseId: K.STAIRCASING.CLASSIC.id });
+  g27.setup();
+  const data27 = new Uint8ClampedArray(src24);
+  await g27.processImageData({ data: data27, width: W24 }, 1, 1);
+  let invalid27 = 0;
+  for (let p = 0; p < W24 * H24; p++) {
+    const i = p * 4;
+    const cs = g27.exactRGBToColourSetIdAndTone([data27[i], data27[i + 1], data27[i + 2]]);
+    if (!cs || cs.colourSetId === "-1") invalid27++;
+  }
+  assert(invalid27 === 0, "ciede2000: all pixels valid (invalid=" + invalid27 + ")");
+  const g27b = makeGenerator({ ditherId: K.DITHER_METHODS.None.id, colourMetric: "lab", staircaseId: K.STAIRCASING.CLASSIC.id });
+  g27b.setup();
+  const data27b = new Uint8ClampedArray(src24);
+  await g27b.processImageData({ data: data27b, width: W24 }, 1, 1);
+  let diff27 = 0;
+  for (let p = 0; p < W24 * H24; p++) if (data27[p * 4] !== data27b[p * 4] || data27[p * 4 + 1] !== data27b[p * 4 + 1]) diff27++;
+  assert(diff27 > 0, "ciede2000 differs from lab matching (" + diff27 + " pixels)");
+
+  console.log("=== Test 28: isolated pixel suppression ===");
+  const countIsolated = (data, W, H) => {
+    let n = 0;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        if (data[i + 3] === 0) continue;
+        let same = 0;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+          const j = (ny * W + nx) * 4;
+          if (data[j] === data[i] && data[j + 1] === data[i + 1] && data[j + 2] === data[i + 2]) same++;
+        }
+        if (same === 0) n++;
+      }
+    }
+    return n;
+  };
+  const g28a = makeGenerator({ ditherId: K.DITHER_METHODS.FloydSteinberg.id, staircaseId: K.STAIRCASING.CLASSIC.id });
+  g28a.setup();
+  const data28a = new Uint8ClampedArray(src24);
+  await g28a.processImageData({ data: data28a, width: W24 }, 1, 1);
+  const g28b = makeGenerator({ ditherId: K.DITHER_METHODS.FloydSteinberg.id, staircaseId: K.STAIRCASING.CLASSIC.id, isolatedCleanup: true, isolatedPasses: 1 });
+  g28b.setup();
+  const data28b = new Uint8ClampedArray(src24);
+  const res28b = await g28b.processImageData({ data: data28b, width: W24 }, 1, 1);
+  const isoBefore = countIsolated(data28a, W24, H24);
+  const isoAfter = countIsolated(data28b, W24, H24);
+  assert(isoAfter < isoBefore, "isolated pixels reduced: " + isoBefore + " -> " + isoAfter);
+  let invalid28 = 0;
+  for (let p = 0; p < W24 * H24; p++) {
+    const i = p * 4;
+    const cs = g28b.exactRGBToColourSetIdAndTone([data28b[i], data28b[i + 1], data28b[i + 2]]);
+    if (!cs || cs.colourSetId === "-1") invalid28++;
+  }
+  const materials28 = Object.values(res28b.maps[0][0].materials).reduce((a, b) => a + b, 0);
+  assert(invalid28 === 0, "suppression keeps all pixels valid (invalid=" + invalid28 + ")");
+  assert(materials28 === W24 * H24, "suppression recount correct (" + materials28 + " == " + W24 * H24 + ")");
+
+  console.log("=== Test 29: batch (band) processing matches single-shot ===");
+  const mapsX29 = 3;
+  const mapsY29 = 3;
+  const W29 = mapsX29 * 128;
+  const H29 = mapsY29 * 128;
+  const src29 = new Uint8ClampedArray(W29 * H29 * 4);
+  for (let y = 0; y < H29; y++) {
+    for (let x = 0; x < W29; x++) {
+      const i = (y * W29 + x) * 4;
+      src29[i] = Math.floor((x / W29) * 255);
+      src29[i + 1] = Math.floor((y / H29) * 255);
+      src29[i + 2] = (x * 5 + y * 11) % 256;
+      src29[i + 3] = 255;
+    }
+  }
+  for (const [ditherId, ditherName, serp] of [
+    [K.DITHER_METHODS.None.id, "None", false],
+    [K.DITHER_METHODS.BlueNoise.id, "BlueNoise", false],
+    [K.DITHER_METHODS.FloydSteinberg.id, "FloydSteinberg", false],
+    [K.DITHER_METHODS.Stucki.id, "Stucki+serpentine", true],
+    [K.DITHER_METHODS.BlueNoiseYliluoma.id, "BlueNoise-Yliluoma", false],
+  ]) {
+    const gSingle = makeGenerator({ ditherId, serpentine: serp, staircaseId: K.STAIRCASING.CLASSIC.id });
+    gSingle.setup();
+    const dataSingle = new Uint8ClampedArray(src29);
+    await gSingle.processImageData({ data: dataSingle, width: W29 }, mapsX29, mapsY29);
+
+    const gBatch = makeGenerator({ ditherId, serpentine: serp, staircaseId: K.STAIRCASING.CLASSIC.id });
+    gBatch.setup();
+    const dataBatch = new Uint8ClampedArray(src29); // bands write into their own buffers; we collect rows
+    const out = new Uint8ClampedArray(W29 * H29 * 4);
+    let carry = null;
+    for (let mapRow = 0; mapRow < mapsY29; mapRow++) {
+      const bandH = 130;
+      const band = new Uint8ClampedArray(W29 * bandH * 4);
+      const copyRows = Math.min(bandH, H29 - mapRow * 128);
+      const srcStart = mapRow * 128 * W29 * 4;
+      band.set(src29.subarray(srcStart, srcStart + copyRows * W29 * 4), 0);
+      const res = await gBatch.processImageBand({ data: band, width: W29 }, mapRow, mapsX29, carry);
+      carry = res.carry;
+      out.set(band.subarray(0, 128 * W29 * 4), mapRow * 128 * W29 * 4);
+    }
+    let diff29 = 0;
+    for (let i = 0; i < W29 * H29 * 4; i++) if (dataSingle[i] !== out[i]) diff29++;
+    assert(diff29 === 0, "batch == single-shot for " + ditherName + " (diff bytes=" + diff29 + ")");
+  }
+  // Riemersma must be rejected in batch mode
+  const gR = makeGenerator({ ditherId: K.DITHER_METHODS.Riemersma.id });
+  gR.setup();
+  let riemersmaRejected = false;
+  try {
+    await gR.processImageBand({ data: new Uint8ClampedArray(W29 * 130 * 4), width: W29 }, 0, mapsX29, null);
+  } catch (e) {
+    riemersmaRejected = true;
+  }
+  assert(riemersmaRejected, "Riemersma is rejected in batch mode");
+
+  console.log("=== Test 30: column (vertical strip) batch processing ===");
+  for (const [ditherId, ditherName, exactExpected] of [
+    [K.DITHER_METHODS.None.id, "None", true],
+    [K.DITHER_METHODS.BlueNoise.id, "BlueNoise", true],
+    [K.DITHER_METHODS.BlueNoiseYliluoma.id, "BlueNoise-Yliluoma", true],
+    [K.DITHER_METHODS.FloydSteinberg.id, "FloydSteinberg", false],
+    [K.DITHER_METHODS.Burkes.id, "Burkes", false],
+    [K.DITHER_METHODS.Stucki.id, "Stucki", false],
+    [K.DITHER_METHODS.MinAvgErr.id, "MinAvgErr", false],
+  ]) {
+    const gSingle = makeGenerator({ ditherId, staircaseId: K.STAIRCASING.CLASSIC.id });
+    gSingle.setup();
+    const dataSingle = new Uint8ClampedArray(src29);
+    await gSingle.processImageData({ data: dataSingle, width: W29 }, mapsX29, mapsY29);
+
+    const gBatch = makeGenerator({ ditherId, staircaseId: K.STAIRCASING.CLASSIC.id });
+    gBatch.setup();
+    const out = new Uint8ClampedArray(W29 * H29 * 4);
+    const carryCols = 2;
+    let colCarry = null;
+    for (let col = 0; col < mapsX29; col++) {
+      const processWidth = 128;
+      const bufferWidth = 128 + 2;
+      const carryStart = 128;
+      let rowCarry = null;
+      const newColCarry = new Uint8ClampedArray(carryCols * mapsY29 * 128 * 4);
+      for (let mapRow = 0; mapRow < mapsY29; mapRow++) {
+        const bandH = 130;
+        const band = new Uint8ClampedArray(bufferWidth * bandH * 4);
+        for (let r = 0; r < bandH; r++) {
+          const gy = mapRow * 128 + r;
+          if (gy >= H29) break;
+          for (let x = 0; x < bufferWidth; x++) {
+            const gx = col * 128 + x;
+            if (gx >= W29) continue;
+            const srcI = (gy * W29 + gx) * 4;
+            const dstI = (r * bufferWidth + x) * 4;
+            band[dstI] = src29[srcI];
+            band[dstI + 1] = src29[srcI + 1];
+            band[dstI + 2] = src29[srcI + 2];
+            band[dstI + 3] = src29[srcI + 3];
+          }
+        }
+        gBatch.applyBandCarries(band, bufferWidth, mapRow, rowCarry, colCarry, carryCols);
+        const res = await gBatch.processImageBand({ data: band, width: bufferWidth }, mapRow, 1, rowCarry, null, {
+          processOffset: 0,
+          processWidth,
+          globalXOffset: 0,
+        });
+        rowCarry = res.carry;
+        gBatch.storeColumnCarry(band, bufferWidth, mapRow, newColCarry, carryCols, carryStart);
+        for (let r = 0; r < 128; r++) {
+          for (let x = 0; x < 128; x++) {
+            const dstI = ((mapRow * 128 + r) * W29 + col * 128 + x) * 4;
+            const srcI = (r * bufferWidth + x) * 4;
+            out[dstI] = band[srcI];
+            out[dstI + 1] = band[srcI + 1];
+            out[dstI + 2] = band[srcI + 2];
+            out[dstI + 3] = band[srcI + 3];
+          }
+        }
+      }
+      colCarry = gBatch.isErrorDiffusionDither() ? newColCarry : null;
+    }
+    if (exactExpected) {
+      let diff30 = 0;
+      for (let i = 0; i < W29 * H29 * 4; i++) if (dataSingle[i] !== out[i]) diff30++;
+      assert(diff30 === 0, "column batch == single-shot for " + ditherName + " (diff bytes=" + diff30 + ")");
+    } else {
+      // error diffusion cannot be bit-exact across column batches (its error flows right-to-left across rows);
+      // verify the output is still fully valid and the difference stays bounded
+      let invalid30 = 0;
+      let diff30 = 0;
+      for (let y = 0; y < H29; y++) {
+        for (let x = 0; x < W29; x++) {
+          const i = (y * W29 + x) * 4;
+          const cs = gBatch.exactRGBToColourSetIdAndTone([out[i], out[i + 1], out[i + 2]]);
+          if (!cs || cs.colourSetId === "-1") invalid30++;
+          if (dataSingle[i] !== out[i] || dataSingle[i + 1] !== out[i + 1] || dataSingle[i + 2] !== out[i + 2]) diff30++;
+        }
+      }
+      assert(invalid30 === 0, ditherName + ": column batch output all valid palette colours (invalid=" + invalid30 + ")");
+      assert(diff30 < W29 * H29 * 0.5, ditherName + ": column batch difference bounded (" + diff30 + " pixels, " + ((diff30 / (W29 * H29)) * 100).toFixed(1) + "%)");
+    }
+  }
+  console.log("=== Test 31: block-size (non-map) mode ===");
+  {
+    // 100x100 artwork on a 128x128 padded canvas: the padding must stay empty
+    const W31 = 128, H31 = 128, artW31 = 100, artH31 = 100;
+    const src31 = new Uint8ClampedArray(W31 * H31 * 4);
+    for (let y = 0; y < artH31; y++) {
+      for (let x = 0; x < artW31; x++) {
+        const i = (y * W31 + x) * 4;
+        src31[i] = (x * 2) % 256;
+        src31[i + 1] = (y * 3) % 256;
+        src31[i + 2] = (x * 7 + y * 13) % 256;
+        src31[i + 3] = 255;
+      }
+    }
+    const g31 = makeGenerator({ ditherId: K.DITHER_METHODS.None.id, artW: artW31, artH: artH31 });
+    g31.setup();
+    await g31.processImageData({ data: src31, width: W31 }, 1, 1);
+
+    let padNonZero31 = 0;
+    for (let y = 0; y < H31; y++) {
+      for (let x = 0; x < W31; x++) {
+        if (x < artW31 && y < artH31) continue;
+        const i = (y * W31 + x) * 4;
+        if (src31[i] || src31[i + 1] || src31[i + 2] || src31[i + 3]) padNonZero31++;
+      }
+    }
+    assert(padNonZero31 === 0, "block-size padding stays empty (" + padNonZero31 + " stray pixels)");
+
+    let layouts31 = g31.cropColoursLayouts(g31.extractColoursLayouts(src31, 1, 1), artW31, artH31);
+    assert(layouts31[0][0].coloursLayout.length === 100 && layouts31[0][0].coloursLayout[0].length === 100, "cropped cell is 100x100");
+
+    const merged31 = g31.buildMergedPhysicalLayout(layouts31);
+    assert(merged31.size[0] === 100 && merged31.size[2] === 100, "merged physical size is 100 x 100 (got " + JSON.stringify(merged31.size) + ")");
+    assert(merged31.blocks.length === 100 * 100, "merged layout has 10000 blocks (got " + merged31.blocks.length + ")");
+
+    const nbt31 = g31.buildSchematicNbt(layouts31[0][0].coloursLayout);
+    const root31 = new NBTReader(nbt31.buffer ? nbt31.buffer : nbt31).readNamedTag();
+    const size31 = root31.value.size.value.value;
+    assert(size31[0] === 100 && size31[2] === 100, "split NBT size is 100 x 100 (got " + JSON.stringify(size31) + ")");
+    assert(root31.value.blocks.value.value.length === 100 * 100, "split NBT has 10000 blocks");
+
+    const mergedNbt31 = g31.buildSchematicNbtMerged(layouts31);
+    const mroot31 = new NBTReader(mergedNbt31.buffer ? mergedNbt31.buffer : mergedNbt31).readNamedTag();
+    const msize31 = mroot31.value.size.value.value;
+    assert(msize31[0] === 100 && msize31[2] === 100, "merged NBT size is 100 x 100 (got " + JSON.stringify(msize31) + ")");
+
+    const lit31 = g31.buildLitematicBytes(layouts31, "blocktest");
+    const gun31 = zlib.gunzipSync(Buffer.from(lit31));
+    const lroot31 = new NBTReader(gun31.buffer.slice(gun31.byteOffset, gun31.byteOffset + gun31.byteLength)).readNamedTag();
+    const lsize31 = readVec3(Object.values(lroot31.value.Regions.value)[0].value.Size.value);
+    assert(lsize31[0] === 100 && lsize31[2] === 100, "merged litematic region is 100 x 100 (got " + JSON.stringify(lsize31) + ")");
+
+    // batch band path must agree with the single-shot layout and keep the padding empty
+    const g31b = makeGenerator({ ditherId: K.DITHER_METHODS.None.id, artW: artW31, artH: artH31 });
+    g31b.setup();
+    const band31 = new Uint8ClampedArray(130 * 130 * 4);
+    for (let y = 0; y < H31; y++) {
+      band31.set(src31.subarray(y * W31 * 4, (y + 1) * W31 * 4), y * 130 * 4);
+    }
+    await g31b.processImageBand({ data: band31, width: 130 }, 0, 1, null, null, { processOffset: 0, processWidth: 128, globalXOffset: 0 });
+    const bandLayout31 = g31b.cropColoursLayout(g31b.extractColoursLayoutsBand(band31, 130, 1, 0)[0], artW31, artH31);
+    let diff31 = 0;
+    for (let x = 0; x < artW31; x++) {
+      for (let z = 0; z < artH31; z++) {
+        const a = layouts31[0][0].coloursLayout[x][z];
+        const b = bandLayout31[x][z];
+        if (a.colourSetId !== b.colourSetId || a.tone !== b.tone) diff31++;
+      }
+    }
+    assert(diff31 === 0, "block-size band layout == single-shot layout (diff=" + diff31 + ")");
+
+    // 200x140 artwork on a 256x256 canvas: edge cells are cropped, merged size is exact
+    const W32 = 256, H32 = 256, artW32 = 200, artH32 = 140;
+    const src32 = new Uint8ClampedArray(W32 * H32 * 4);
+    for (let y = 0; y < artH32; y++) {
+      for (let x = 0; x < artW32; x++) {
+        const i = (y * W32 + x) * 4;
+        src32[i] = (x * 5) % 256;
+        src32[i + 1] = (y * 11) % 256;
+        src32[i + 2] = (x + y) % 256;
+        src32[i + 3] = 255;
+      }
+    }
+    const g32 = makeGenerator({ ditherId: K.DITHER_METHODS.None.id, artW: artW32, artH: artH32 });
+    g32.setup();
+    await g32.processImageData({ data: src32, width: W32 }, 2, 2);
+    const layouts32 = g32.cropColoursLayouts(g32.extractColoursLayouts(src32, 2, 2), artW32, artH32);
+    const cellDims32 = layouts32.map((row) => row.map((c) => c.coloursLayout.length + "x" + c.coloursLayout[0].length));
+    assert(JSON.stringify(cellDims32) === JSON.stringify([["128x128", "72x128"], ["128x12", "72x12"]]), "edge cells cropped to 128x128/72x128/128x12/72x12 (got " + JSON.stringify(cellDims32) + ")");
+    const merged32 = g32.buildMergedPhysicalLayout(layouts32);
+    assert(merged32.size[0] === 200 && merged32.size[2] === 140, "multi-cell merged size is 200 x 140 (got " + JSON.stringify(merged32.size) + ")");
+    assert(merged32.blocks.length === 200 * 140, "multi-cell merged block count 28000 (got " + merged32.blocks.length + ")");
+    const mroot32 = new NBTReader((() => { const b = g32.buildSchematicNbtMerged(layouts32); return b.buffer ? b.buffer : b; })()).readNamedTag();
+    const msize32 = mroot32.value.size.value.value;
+    assert(msize32[0] === 200 && msize32[2] === 140, "multi-cell merged NBT size is 200 x 140 (got " + JSON.stringify(msize32) + ")");
+  }
+
 })().catch((e) => {
   console.error("Test harness error:", e);
   process.exit(1);

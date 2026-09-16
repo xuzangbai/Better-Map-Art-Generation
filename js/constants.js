@@ -4,7 +4,7 @@
    Data versions verified from official Mojang client jars (Aug 2026). */
 
 window.MapArtConstants = (() => {
-  const TOOL_VERSION = "v1.11";
+  const TOOL_VERSION = "v1.24";
 
   /* layout modes: flat floor map art vs. vertical wall pixel art */
   const LAYOUT_MODES = {
@@ -28,6 +28,44 @@ window.MapArtConstants = (() => {
     const lc = String(displayName || "").toLowerCase();
     if (lc.includes("sea lantern")) return false;
     return WALL_UNSUPPORTED_PATTERNS.some((p) => lc.includes(p));
+  }
+
+  /* recursive Bayer threshold matrix (1..n*n), n a power of two */
+  function bayerMatrix(n) {
+    if (n === 1) return [[0]];
+    const half = bayerMatrix(n / 2);
+    const h = n / 2;
+    const out = [];
+    for (let y = 0; y < n; y++) out.push(new Array(n));
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < h; x++) {
+        const v = half[y][x];
+        out[y][x] = 4 * v;
+        out[y][x + h] = 4 * v + 2;
+        out[y + h][x] = 4 * v + 3;
+        out[y + h][x + h] = 4 * v + 1;
+      }
+    }
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) out[y][x] += 1;
+    return out;
+  }
+
+  /* decode the generated 64x64 blue noise mask (data/bluenoise.js) */
+  let blueNoiseMask = null;
+  function getBlueNoiseMask() {
+    if (blueNoiseMask) return blueNoiseMask;
+    const raw = typeof window !== "undefined" ? window.BLUE_NOISE_64 : null;
+    if (!raw) return null;
+    const bin = atob(raw.data);
+    const size = raw.size;
+    const matrix = [];
+    for (let y = 0; y < size; y++) {
+      const row = new Array(size);
+      for (let x = 0; x < size; x++) row[x] = bin.charCodeAt(y * size + x);
+      matrix.push(row);
+    }
+    blueNoiseMask = { size, matrix };
+    return blueNoiseMask;
   }
   const SUPPORTED_VERSIONS = [
     { MCVersion: "1.12.2", NBTVersion: 1343 },
@@ -89,6 +127,7 @@ window.MapArtConstants = (() => {
     Bayer44: {
       id: 2,
       name: "Bayer (4x4)",
+      levels: 16,
       ditherMatrix: [
         [1, 9, 3, 11],
         [13, 5, 15, 7],
@@ -99,6 +138,7 @@ window.MapArtConstants = (() => {
     Bayer22: {
       id: 3,
       name: "Bayer (2x2)",
+      levels: 4,
       ditherMatrix: [
         [1, 3],
         [4, 2],
@@ -107,6 +147,7 @@ window.MapArtConstants = (() => {
     Ordered33: {
       id: 4,
       name: "Ordered (3x3)",
+      levels: 9,
       ditherMatrix: [
         [1, 7, 4],
         [5, 8, 3],
@@ -163,7 +204,45 @@ window.MapArtConstants = (() => {
       ],
       ditherDivisor: 8.0,
     },
+    Bayer88: {
+      id: 10,
+      name: "Bayer (8x8)",
+      levels: 64,
+      ditherMatrix: bayerMatrix(8),
+    },
+    BlueNoise: {
+      id: 11,
+      name: "蓝噪声 (Blue Noise)",
+      levels: 256,
+      blueNoise: true,
+    },
+    Yliluoma: {
+      id: 12,
+      name: "Yliluoma 有序",
+      yliluoma: true,
+    },
+    Riemersma: {
+      id: 13,
+      name: "Riemersma（希尔伯特曲线）",
+      riemersma: true,
+    },
+    BlueNoiseYliluoma: {
+      id: 14,
+      name: "蓝噪声 · Yliluoma",
+      yliluoma: true,
+      blueNoise: true,
+    },
   };
+
+  /* error-diffusion dither ids (serpentine scanning applies to these) */
+  const ERROR_DIFFUSION_IDS = [
+    DITHER_METHODS.FloydSteinberg.id,
+    DITHER_METHODS.MinAvgErr.id,
+    DITHER_METHODS.Burkes.id,
+    DITHER_METHODS.SierraLite.id,
+    DITHER_METHODS.Stucki.id,
+    DITHER_METHODS.Atkinson.id,
+  ];
 
   const CROP_MODES = {
     STRETCH: { id: 0, name: "拉伸适应" },
@@ -241,6 +320,9 @@ window.MapArtConstants = (() => {
     TOOL_VERSION,
     LAYOUT_MODES,
     isWallUnsupported,
+    bayerMatrix,
+    getBlueNoiseMask,
+    ERROR_DIFFUSION_IDS,
     SUPPORTED_VERSIONS,
     STAIRCASING,
     SUPPORT_MODES,

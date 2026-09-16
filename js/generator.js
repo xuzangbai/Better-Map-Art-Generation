@@ -19,6 +19,147 @@ function gzipBytes(data) {
   throw new Error("pako (gzip) not available");
 }
 
+function clampByte(v) {
+  return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+}
+
+/* writes a packed palette index into a big-endian NBT long array (tight LSB-first packing,
+   matching litematica's TightLongBackedIntArray) */
+function writePackedEntry(longsView, bits, index, value) {
+  const startOffset = index * bits;
+  const startArr = Math.floor(startOffset / 64);
+  const bitOffset = startOffset % 64;
+  value &= (1 << bits) - 1;
+  const loWord = startArr * 8 + 4; // big-endian: lo word is the LAST 4 bytes of the long
+  const hiWord = startArr * 8; // big-endian: hi word is the FIRST 4 bytes of the long
+  if (bitOffset + bits <= 64) {
+    if (bitOffset + bits <= 32) {
+      let w = longsView.getUint32(loWord, false);
+      w = (w & ~(((1 << bits) - 1) << bitOffset)) >>> 0;
+      w = (w | (value << bitOffset)) >>> 0;
+      longsView.setUint32(loWord, w, false);
+    } else if (bitOffset >= 32) {
+      const wb = bitOffset - 32;
+      let w = longsView.getUint32(hiWord, false);
+      w = (w & ~(((1 << bits) - 1) << wb)) >>> 0;
+      w = (w | (value << wb)) >>> 0;
+      longsView.setUint32(hiWord, w, false);
+    } else {
+      const firstBits = 32 - bitOffset;
+      const rest = bits - firstBits;
+      let lo = longsView.getUint32(loWord, false);
+      let hi = longsView.getUint32(hiWord, false);
+      lo = (lo & ~(((1 << firstBits) - 1) << bitOffset)) >>> 0;
+      lo = (lo | ((value & ((1 << firstBits) - 1)) << bitOffset)) >>> 0;
+      hi = (hi & ~((1 << rest) - 1)) >>> 0;
+      hi = (hi | (value >>> firstBits)) >>> 0;
+      longsView.setUint32(loWord, lo, false);
+      longsView.setUint32(hiWord, hi, false);
+    }
+  } else {
+    const firstBits = 64 - bitOffset;
+    const rest = bits - firstBits;
+    const wb = bitOffset - 32;
+    let hi = longsView.getUint32(hiWord, false);
+    hi = (hi & ~(((1 << firstBits) - 1) << wb)) >>> 0;
+    hi = (hi | ((value & ((1 << firstBits) - 1)) << wb)) >>> 0;
+    longsView.setUint32(hiWord, hi, false);
+    let nlo = longsView.getUint32((startArr + 1) * 8 + 4, false);
+    nlo = (nlo & ~((1 << rest) - 1)) >>> 0;
+    nlo = (nlo | (value >>> firstBits)) >>> 0;
+    longsView.setUint32((startArr + 1) * 8 + 4, nlo, false);
+  }
+}
+
+/* CIEDE2000 colour difference (Sharma et al. implementation notes).
+   lab1/lab2: standard CIELAB [L, a, b]. Returns delta-E (roughly 0..100). */
+function deltaE2000(lab1, lab2) {
+  const L1 = lab1[0];
+  const a1 = lab1[1];
+  const b1 = lab1[2];
+  const L2 = lab2[0];
+  const a2 = lab2[1];
+  const b2 = lab2[2];
+  const C1 = Math.sqrt(a1 * a1 + b1 * b1);
+  const C2 = Math.sqrt(a2 * a2 + b2 * b2);
+  const Cbar = (C1 + C2) / 2;
+  const Cbar7 = Math.pow(Cbar, 7);
+  const G = 0.5 * (1 - Math.sqrt(Cbar7 / (Cbar7 + 6103515625)));
+  const a1p = (1 + G) * a1;
+  const a2p = (1 + G) * a2;
+  const C1p = Math.sqrt(a1p * a1p + b1 * b1);
+  const C2p = Math.sqrt(a2p * a2p + b2 * b2);
+  const h1p = C1p === 0 ? 0 : (Math.atan2(b1, a1p) * 180) / Math.PI;
+  const h2p = C2p === 0 ? 0 : (Math.atan2(b2, a2p) * 180) / Math.PI;
+  const h1pPos = h1p < 0 ? h1p + 360 : h1p;
+  const h2pPos = h2p < 0 ? h2p + 360 : h2p;
+  const dLp = L2 - L1;
+  const dCp = C2p - C1p;
+  let dhp = 0;
+  if (C1p * C2p !== 0) {
+    dhp = h2pPos - h1pPos;
+    if (dhp > 180) dhp -= 360;
+    else if (dhp < -180) dhp += 360;
+  }
+  const dHp = 2 * Math.sqrt(C1p * C2p) * Math.sin((dhp / 2) * (Math.PI / 180));
+  const Lbarp = (L1 + L2) / 2;
+  const Cbarp = (C1p + C2p) / 2;
+  let hbarp;
+  if (C1p * C2p === 0) {
+    hbarp = h1pPos + h2pPos;
+  } else {
+    const diff = Math.abs(h1pPos - h2pPos);
+    const sum = h1pPos + h2pPos;
+    if (diff <= 180) hbarp = sum / 2;
+    else if (sum < 360) hbarp = (sum + 360) / 2;
+    else hbarp = (sum - 360) / 2;
+  }
+  const T =
+    1 -
+    0.17 * Math.cos(((hbarp - 30) * Math.PI) / 180) +
+    0.24 * Math.cos(((2 * hbarp) * Math.PI) / 180) +
+    0.32 * Math.cos(((3 * hbarp + 6) * Math.PI) / 180) -
+    0.2 * Math.cos(((4 * hbarp - 63) * Math.PI) / 180);
+  const dTheta = 30 * Math.exp(-Math.pow((hbarp - 275) / 25, 2));
+  const Cbarp7 = Math.pow(Cbarp, 7);
+  const RC = 2 * Math.sqrt(Cbarp7 / (Cbarp7 + 6103515625));
+  const L50sq = Math.pow(Lbarp - 50, 2);
+  const SL = 1 + (0.015 * L50sq) / Math.sqrt(20 + L50sq);
+  const SC = 1 + 0.045 * Cbarp;
+  const SH = 1 + 0.015 * Cbarp * T;
+  const RT = -Math.sin(((2 * dTheta) * Math.PI) / 180) * RC;
+  const dL = dLp / SL;
+  const dC = dCp / SC;
+  const dH = dHp / SH;
+  return Math.sqrt(dL * dL + dC * dC + dH * dH + RT * dC * dH);
+}
+
+/* d -> (x, y) on a Hilbert curve of order n (n a power of two) */
+function hilbertD2XY(n, d) {
+  let rx;
+  let ry;
+  let t = d;
+  let x = 0;
+  let y = 0;
+  for (let s = 1; s < n; s *= 2) {
+    rx = 1 & (t >> 1);
+    ry = 1 & (t ^ rx);
+    if (ry === 0) {
+      if (rx === 1) {
+        x = s - 1 - x;
+        y = s - 1 - y;
+      }
+      const tmp = x;
+      x = y;
+      y = tmp;
+    }
+    x += s * rx;
+    y += s * ry;
+    t >>= 2;
+  }
+  return [x, y];
+}
+
 class MapGenerator {
   constructor(coloursJSON, opts) {
     this.coloursJSON = coloursJSON;
@@ -34,11 +175,24 @@ class MapGenerator {
     this.transparencyTolerance = opts.transparencyTolerance || 128;
     this.mapdatUnobtainable = !!opts.mapdatUnobtainable;
     this.wallMode = !!opts.wallMode; // vertical wall pixel art (image rows -> Y, 1 block thick)
+    this.serpentine = !!opts.serpentine; // alternate scan direction for error diffusion
+    // block-size mode: the artwork only covers the top-left artW x artH region of the
+    // (128-aligned) canvas; everything outside stays empty (0 = no limit)
+    this.artW = opts.artW || 0;
+    this.artH = opts.artH || 0;
+    // colour difference metric: "rgb" | "lab" | "ciede2000" (betterColour kept for compatibility)
+    this.colourMetric = opts.colourMetric || (opts.betterColour === false ? "rgb" : "lab");
+    this.isolatedCleanup = !!opts.isolatedCleanup;
+    this.isolatedPasses = opts.isolatedPasses || 1;
+    this.gpuAccel = !!opts.gpuAccel; // WebGL2 colour lookup table for nearest-colour search
+    this.lut = null;
+    this.lutPalette = null;
 
     this.colourSetsToUse = [];
     this.exactColourCache = new Map();
     this.colourCache = new Map();
     this.labCache = new Map();
+    this.labStdCache = new Map();
     this.dither = null;
   }
 
@@ -65,7 +219,11 @@ class MapGenerator {
   }
 
   squaredEuclideanMetricColours(pixel1, pixel2) {
-    if (this.betterColour) {
+    if (this.colourMetric === "ciede2000") {
+      const dE = deltaE2000(this.rgb2labStd(pixel1), this.rgb2labStd(pixel2));
+      return dE * dE;
+    }
+    if (this.colourMetric === "lab") {
       pixel1 = this.rgb2lab(pixel1);
       pixel2 = this.rgb2lab(pixel2);
     }
@@ -75,11 +233,35 @@ class MapGenerator {
     return r * r + g * g + b * b;
   }
 
+  /* standard CIELAB (D65), used by CIEDE2000 */
+  rgb2labStd(rgb) {
+    const key = (rgb[0] << 16) + (rgb[1] << 8) + rgb[2];
+    if (this.labStdCache.has(key)) return this.labStdCache.get(key);
+    let r = rgb[0] / 255.0;
+    let g = rgb[1] / 255.0;
+    let b = rgb[2] / 255.0;
+    r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+    g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+    b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+    const x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
+    const y = 0.2126729 * r + 0.7151522 * g + 0.072175 * b;
+    const z = (0.0193339 * r + 0.119192 * g + 0.9503041 * b) / 1.08883;
+    const fx = x > 0.008856 ? Math.cbrt(x) : 7.787 * x + 16 / 116;
+    const fy = y > 0.008856 ? Math.cbrt(y) : 7.787 * y + 16 / 116;
+    const fz = z > 0.008856 ? Math.cbrt(z) : 7.787 * z + 16 / 116;
+    const out = [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+    this.labStdCache.set(key, out);
+    return out;
+  }
+
   colourSetIdAndToneToRGB(colourSetId, tone) {
     return this.coloursJSON[colourSetId].tonesRGB[tone];
   }
 
   findClosestColourSetIdAndToneTo(pixelRGB) {
+    if (this.lut) {
+      return this.lutPalette[this.lut.nearest[(pixelRGB[0] << 16) | (pixelRGB[1] << 8) | pixelRGB[2]]];
+    }
     const RGBBinary = (pixelRGB[0] << 16) + (pixelRGB[1] << 8) + pixelRGB[2];
     if (this.colourCache.has(RGBBinary)) return this.colourCache.get(RGBBinary);
     let shortestDistance = 9999999;
@@ -99,6 +281,19 @@ class MapGenerator {
   }
 
   findClosest2ColourSetIdAndToneTo(pixelRGB) {
+    if (this.lut) {
+      const idx = (pixelRGB[0] << 16) | (pixelRGB[1] << 8) | pixelRGB[2];
+      let closestPixel1 = this.lutPalette[this.lut.nearest[idx]];
+      let closestPixel2 = this.lutPalette[this.lut.second[idx]];
+      let shortestDistance1 = this.squaredEuclideanMetricColours(closestPixel1.rgb, pixelRGB);
+      let shortestDistance2 = this.squaredEuclideanMetricColours(closestPixel2.rgb, pixelRGB);
+      if (
+        this.squaredEuclideanMetricColours(closestPixel1.rgb, closestPixel2.rgb) <= shortestDistance2
+      ) {
+        closestPixel2 = closestPixel1;
+      }
+      return [shortestDistance1, shortestDistance2, closestPixel1, closestPixel2];
+    }
     const RGBBinary = (pixelRGB[0] << 16) + (pixelRGB[1] << 8) + pixelRGB[2];
     if (this.colourCache.has(RGBBinary)) return this.colourCache.get(RGBBinary);
     let shortestDistance1 = 9999999;
@@ -137,6 +332,7 @@ class MapGenerator {
     this.colourSetsToUse = [];
     this.colourCache.clear();
     this.labCache.clear();
+    this.labStdCache.clear();
     this.exactColourCache.clear();
 
     const toneKeys = this.getToneKeys();
@@ -160,6 +356,45 @@ class MapGenerator {
 
     const chosenDitherMethod = window.MapArtConstants.DITHER_METHODS[Object.keys(window.MapArtConstants.DITHER_METHODS).find((k) => window.MapArtConstants.DITHER_METHODS[k].id === this.ditherId)];
     if (chosenDitherMethod && chosenDitherMethod.ditherMatrix) this.dither = chosenDitherMethod;
+
+    // blue noise mask (lazily decoded from data/bluenoise.js)
+    this.blueNoise = window.MapArtConstants.getBlueNoiseMask();
+
+    // flattened palette for Yliluoma's ordered dithering
+    this.yliluomaPalette = [];
+    for (const cs of this.colourSetsToUse) {
+      for (const tone of Object.keys(cs.tonesRGB)) {
+        this.yliluomaPalette.push({ colourSetId: cs.colourSetId, tone, rgb: cs.tonesRGB[tone] });
+      }
+    }
+    this.yliluomaCache = new Map();
+    // flat palette list is also used by the GPU lookup table
+    this.lutPalette = this.yliluomaPalette;
+    this.lut = null;
+  }
+
+  /* build (or reuse) the GPU colour lookup table; falls back to CPU search when unavailable */
+  async ensureLut(onProgress) {
+    this.lut = null;
+    if (!this.gpuAccel) return;
+    if (typeof window === "undefined" || !window.GLLut || !window.GLLut.isSupported()) return;
+    const palette = this.lutPalette;
+    if (!palette || palette.length === 0 || palette.length > 255) return;
+    const key = this.colourMetric + "|" + palette.map((p) => p.rgb.join(",")).join(";");
+    const cached = window.GLLut.getCached(key);
+    if (cached) {
+      this.lut = cached;
+      if (onProgress) onProgress(1);
+      return;
+    }
+    try {
+      const lut = await window.GLLut.build(palette, this.colourMetric, onProgress);
+      window.GLLut.setCached(key, lut);
+      this.lut = lut;
+    } catch (e) {
+      console.warn("GPU LUT unavailable, falling back to CPU:", e);
+      this.lut = null;
+    }
   }
 
   getToneKeys() {
@@ -210,129 +445,670 @@ class MapGenerator {
 
     if (this.colourSetsToUse.length === 0) return { maps };
 
-    const ditherMatrix = this.dither ? this.dither.ditherMatrix : null;
-    const divisor = this.dither ? this.dither.ditherDivisor : null;
+    // GPU colour lookup table (exact nearest-colour results, huge speedup)
+    await this.ensureLut(onProgress ? (p) => onProgress(p * 0.3) : null);
+    const progressScale = this.lut ? 0.3 : 0;
+    const report = onProgress ? (p) => onProgress(progressScale + (1 - progressScale) * p) : null;
+
     const ditherId = this.ditherId;
     const D = window.MapArtConstants.DITHER_METHODS;
-    const errorDiffusionIds = [D.FloydSteinberg.id, D.MinAvgErr.id, D.Burkes.id, D.SierraLite.id, D.Stucki.id, D.Atkinson.id];
+    const errorDiffusionIds = window.MapArtConstants.ERROR_DIFFUSION_IDS;
+
+    // Riemersma walks the image along a Hilbert curve, so it needs its own pass
+    if (ditherId === D.Riemersma.id) {
+      return this.processRiemersma(data, maps, multimapWidth, totalRows, onProgress);
+    }
+
+    const ditherMatrix = this.dither ? this.dither.ditherMatrix : null;
+    const divisor = this.dither ? this.dither.ditherDivisor : null;
+    const serpentine = this.serpentine && errorDiffusionIds.includes(ditherId);
     const yieldEvery = Math.max(1, Math.floor(totalRows / 250)); // ~250 UI yields total
 
+    const dctx = { ditherId, D, errorDiffusionIds, serpentine, ditherMatrix, divisor, width: multimapWidth };
     for (let rowY = 0; rowY < totalRows; rowY++) {
       const rowStart = rowY * multimapWidth * 4;
       const rowEnd = rowStart + multimapWidth * 4;
 
-      for (let i = rowStart; i < rowEnd; i += 4) {
+      const dir = serpentine && rowY % 2 === 1 ? -1 : 1;
+      for (let i = dir === 1 ? rowStart : rowEnd - 4; dir === 1 ? i < rowEnd : i >= rowStart; i += 4 * dir) {
         const multimap_x = (i / 4) % multimapWidth;
         const whichMap_x = Math.floor(multimap_x / 128);
         const whichMap_y = Math.floor(rowY / 128);
-
-        let closestColourSetIdAndTone;
-        if (this.transparency && data[i + 3] < this.transparencyTolerance) {
-          data[i] = 0;
-          data[i + 1] = 0;
-          data[i + 2] = 0;
-          data[i + 3] = 0;
-        } else {
-          data[i + 3] = 255;
-          const oldPixel = [data[i], data[i + 1], data[i + 2]];
-          if (ditherMatrix === null) {
-            closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
-            const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
-            data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
-          } else if (ditherId === D.Bayer44.id || ditherId === D.Bayer22.id || ditherId === D.Ordered33.id) {
-            const newPixels = this.findClosest2ColourSetIdAndToneTo(oldPixel);
-            if ((newPixels[0] * (ditherMatrix[0].length * ditherMatrix.length + 1)) / newPixels[1] > ditherMatrix[multimap_x % ditherMatrix[0].length][rowY % ditherMatrix.length]) {
-              closestColourSetIdAndTone = newPixels[3];
-            } else {
-              closestColourSetIdAndTone = newPixels[2];
-            }
-            const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
-            data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
-          } else if (errorDiffusionIds.includes(ditherId)) {
-            closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
-            const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
-            data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
-            const quant_error = [oldPixel[0] - c[0], oldPixel[1] - c[1], oldPixel[2] - c[2]];
-            try {
-              if (multimap_x + 1 < multimapWidth) {
-                const weight = ditherMatrix[0][3] / divisor;
-                data[i + 4] += quant_error[0] * weight; data[i + 5] += quant_error[1] * weight; data[i + 6] += quant_error[2] * weight;
-                if (multimap_x + 2 < multimapWidth) {
-                  const weight = ditherMatrix[0][4] / divisor;
-                  data[i + 8] += quant_error[0] * weight; data[i + 9] += quant_error[1] * weight; data[i + 10] += quant_error[2] * weight;
-                }
-              }
-              if (multimap_x > 0) {
-                const weight = ditherMatrix[1][1] / divisor;
-                data[i + multimapWidth * 4 - 4] += quant_error[0] * weight;
-                data[i + multimapWidth * 4 - 3] += quant_error[1] * weight;
-                data[i + multimapWidth * 4 - 2] += quant_error[2] * weight;
-                if (multimap_x > 1) {
-                  const weight = ditherMatrix[1][0] / divisor;
-                  data[i + multimapWidth * 4 - 8] += quant_error[0] * weight;
-                  data[i + multimapWidth * 4 - 7] += quant_error[1] * weight;
-                  data[i + multimapWidth * 4 - 6] += quant_error[2] * weight;
-                }
-              }
-              let weight = ditherMatrix[1][2] / divisor;
-              data[i + multimapWidth * 4] += quant_error[0] * weight;
-              data[i + multimapWidth * 4 + 1] += quant_error[1] * weight;
-              data[i + multimapWidth * 4 + 2] += quant_error[2] * weight;
-              if (multimap_x + 1 < multimapWidth) {
-                const weight = ditherMatrix[1][3] / divisor;
-                data[i + multimapWidth * 4 + 4] += quant_error[0] * weight;
-                data[i + multimapWidth * 4 + 5] += quant_error[1] * weight;
-                data[i + multimapWidth * 4 + 6] += quant_error[2] * weight;
-                if (multimap_x + 2 < multimapWidth) {
-                  const weight = ditherMatrix[1][4] / divisor;
-                  data[i + multimapWidth * 4 + 8] += quant_error[0] * weight;
-                  data[i + multimapWidth * 4 + 9] += quant_error[1] * weight;
-                  data[i + multimapWidth * 4 + 10] += quant_error[2] * weight;
-                }
-              }
-              if (multimap_x > 0) {
-                const weight = ditherMatrix[2][1] / divisor;
-                data[i + multimapWidth * 8 - 4] += quant_error[0] * weight;
-                data[i + multimapWidth * 8 - 3] += quant_error[1] * weight;
-                data[i + multimapWidth * 8 - 2] += quant_error[2] * weight;
-                if (multimap_x > 1) {
-                  const weight = ditherMatrix[2][0] / divisor;
-                  data[i + multimapWidth * 8 - 8] += quant_error[0] * weight;
-                  data[i + multimapWidth * 8 - 7] += quant_error[1] * weight;
-                  data[i + multimapWidth * 8 - 6] += quant_error[2] * weight;
-                }
-              }
-              weight = ditherMatrix[2][2] / divisor;
-              data[i + multimapWidth * 8] += quant_error[0] * weight;
-              data[i + multimapWidth * 8 + 1] += quant_error[1] * weight;
-              data[i + multimapWidth * 8 + 2] += quant_error[2] * weight;
-              if (multimap_x + 1 < multimapWidth) {
-                const weight = ditherMatrix[2][3] / divisor;
-                data[i + multimapWidth * 8 + 4] += quant_error[0] * weight;
-                data[i + multimapWidth * 8 + 5] += quant_error[1] * weight;
-                data[i + multimapWidth * 8 + 6] += quant_error[2] * weight;
-                if (multimap_x + 2 < multimapWidth) {
-                  const weight = ditherMatrix[2][4] / divisor;
-                  data[i + multimapWidth * 8 + 8] += quant_error[0] * weight;
-                  data[i + multimapWidth * 8 + 9] += quant_error[1] * weight;
-                  data[i + multimapWidth * 8 + 10] += quant_error[2] * weight;
-                }
-              }
-            } catch (e) {
-              console.error(e);
-            }
-          }
+        const closestColourSetIdAndTone = this.ditherPixel(data, i, multimap_x, rowY, dctx);
+        if (closestColourSetIdAndTone) {
           maps[whichMap_y][whichMap_x].materials[closestColourSetIdAndTone.colourSetId] += 1;
         }
       }
 
       if (onProgress && (rowY + 1) % yieldEvery === 0) {
-        onProgress((rowY + 1) / totalRows);
+        report((rowY + 1) / totalRows);
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     }
+    if (this.isolatedCleanup) {
+      this.suppressIsolatedPixels(data, multimapWidth, totalRows);
+      this.recountMaterials(data, maps, multimapWidth, totalRows);
+    }
     if (onProgress) onProgress(1);
     return { maps };
+  }
+
+  /* quantize a single pixel (shared by full-image and band/batch processing).
+     Writes the quantized colour (and any diffusion error) into `data`;
+     returns {colourSetId, tone} or null when the pixel is transparent. */
+  ditherPixel(data, i, x, yGlobal, ctx) {
+    const { ditherId, D, errorDiffusionIds, serpentine, ditherMatrix, divisor, width } = ctx;
+    const xGlobal = x + (ctx.xGlobalOffset || 0);
+    if (this.artW > 0 && (xGlobal >= this.artW || yGlobal >= this.artH)) {
+      // outside the artwork (block-size mode padding): keep it empty
+      data[i] = 0;
+      data[i + 1] = 0;
+      data[i + 2] = 0;
+      data[i + 3] = 0;
+      return null;
+    }
+    if (this.transparency && data[i + 3] < this.transparencyTolerance) {
+      data[i] = 0;
+      data[i + 1] = 0;
+      data[i + 2] = 0;
+      data[i + 3] = 0;
+      return null;
+    }
+    data[i + 3] = 255;
+    const oldPixel = [data[i], data[i + 1], data[i + 2]];
+    let closestColourSetIdAndTone;
+    if (ditherId === D.None.id) {
+      closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
+      const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+    } else if (this.isOrderedDitherId(ditherId)) {
+      const newPixels = this.findClosest2ColourSetIdAndToneTo(oldPixel);
+      const levelsPlus1 = this.ditherLevelsFor(ditherId) + 1;
+      const threshold = this.ditherThresholdAt(ditherId, xGlobal, yGlobal);
+      if ((newPixels[0] * levelsPlus1) / newPixels[1] > threshold) {
+        closestColourSetIdAndTone = newPixels[3];
+      } else {
+        closestColourSetIdAndTone = newPixels[2];
+      }
+      const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+    } else if (ditherId === D.Yliluoma.id || ditherId === D.BlueNoiseYliluoma.id) {
+      closestColourSetIdAndTone = this.yliluomaChoose(oldPixel, xGlobal, yGlobal, ditherId === D.BlueNoiseYliluoma.id);
+      const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+    } else if (errorDiffusionIds.includes(ditherId)) {
+      closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
+      const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+      const quant_error = [oldPixel[0] - c[0], oldPixel[1] - c[1], oldPixel[2] - c[2]];
+      const m = ditherMatrix;
+      const dv = divisor;
+      const dir = serpentine && yGlobal % 2 === 1 ? -1 : 1;
+      const inX = (sdx) => {
+        const nx = x + sdx * dir;
+        return nx >= 0 && nx < width;
+      };
+      const addError = (sdx, dy, weight) => {
+        const off = i + sdx * dir * 4 + dy * width * 4;
+        data[off] += quant_error[0] * weight;
+        data[off + 1] += quant_error[1] * weight;
+        data[off + 2] += quant_error[2] * weight;
+      };
+      try {
+        if (inX(1)) {
+          addError(1, 0, m[0][3] / dv);
+          if (inX(2)) addError(2, 0, m[0][4] / dv);
+        }
+        if (inX(-1)) {
+          addError(-1, 1, m[1][1] / dv);
+          if (inX(-2)) addError(-2, 1, m[1][0] / dv);
+        }
+        addError(0, 1, m[1][2] / dv);
+        if (inX(1)) {
+          addError(1, 1, m[1][3] / dv);
+          if (inX(2)) addError(2, 1, m[1][4] / dv);
+        }
+        if (inX(-1)) {
+          addError(-1, 2, m[2][1] / dv);
+          if (inX(-2)) addError(-2, 2, m[2][0] / dv);
+        }
+        addError(0, 2, m[2][2] / dv);
+        if (inX(1)) {
+          addError(1, 2, m[2][3] / dv);
+          if (inX(2)) addError(2, 2, m[2][4] / dv);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    } else {
+      // unknown method: nearest colour
+      closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
+      const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
+      data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
+    }
+    return closestColourSetIdAndTone;
+  }
+
+  /* ----- batch (band) processing for very large images ----- */
+
+  // processes one map row (128 pixel rows) from a band buffer that has 2 extra carry rows at the bottom.
+  // imageData: RGBA band buffer
+  // opts: { processOffset, processWidth, globalXOffset, snapshot: { start, cols, target } }
+  // carry: { rows: [Uint8ClampedArray, Uint8ClampedArray] } from the previous band (error diffusion only)
+  // returns { maps: [mapsX entries], carry } for the next band
+  async processImageBand(imageData, mapRowIndex, mapsX, carry, onProgress, opts) {
+    const data = imageData.data;
+    const width = imageData.width || mapsX * 128;
+    const processOffset = (opts && opts.processOffset) || 0;
+    const processWidth = (opts && opts.processWidth) || width - processOffset;
+    const globalXOffset = (opts && opts.globalXOffset) || 0;
+    const snapshot = (opts && opts.snapshot) || null;
+    const D = window.MapArtConstants.DITHER_METHODS;
+    if (this.ditherId === D.Riemersma.id) {
+      throw new Error("分批计算模式不支持 Riemersma 算法，请改用其他抖动算法");
+    }
+
+    const mapsRow = [];
+    for (let mx = 0; mx < mapsX; mx++) {
+      const materials = {};
+      for (const cs of this.colourSetsToUse) materials[cs.colourSetId] = 0;
+      mapsRow.push({ materials });
+    }
+
+    // apply the error-diffusion carry-over from the previous band
+    if (carry && carry.rows && this.isErrorDiffusionDither()) {
+      for (let r = 0; r < carry.rows.length && r < 2; r++) {
+        const rowData = carry.rows[r];
+        if (!rowData) continue;
+        data.set(rowData, r * width * 4);
+      }
+    }
+
+    const errorDiffusionIds = window.MapArtConstants.ERROR_DIFFUSION_IDS;
+    const ditherMatrix = this.dither ? this.dither.ditherMatrix : null;
+    const divisor = this.dither ? this.dither.ditherDivisor : null;
+    const serpentine = this.serpentine && errorDiffusionIds.includes(this.ditherId);
+    const dctx = {
+      ditherId: this.ditherId,
+      D,
+      errorDiffusionIds,
+      serpentine,
+      ditherMatrix,
+      divisor,
+      width,
+      xGlobalOffset: globalXOffset,
+    };
+    const globalStartRow = mapRowIndex * 128;
+
+    for (let row = 0; row < 128; row++) {
+      const rowStart = row * width * 4;
+      const rowEnd = rowStart + (processOffset + processWidth) * 4;
+      const dir = serpentine && (globalStartRow + row) % 2 === 1 ? -1 : 1;
+      for (let i = dir === 1 ? rowStart + processOffset * 4 : rowEnd - 4; dir === 1 ? i < rowEnd : i >= rowStart + processOffset * 4; i += 4 * dir) {
+        const x = (i / 4) % width;
+        const mx = Math.floor((x - processOffset) / 128);
+        if (snapshot && x >= snapshot.start && x < snapshot.start + snapshot.cols) {
+          // capture the pre-quantization input of the overlap columns (re-processed by the next batch)
+          const targetOffset = (row * snapshot.cols + (x - snapshot.start)) * 4;
+          snapshot.target[targetOffset] = data[i];
+          snapshot.target[targetOffset + 1] = data[i + 1];
+          snapshot.target[targetOffset + 2] = data[i + 2];
+          snapshot.target[targetOffset + 3] = data[i + 3];
+        }
+        const closest = this.ditherPixel(data, i, x, globalStartRow + row, dctx);
+        if (closest && mx >= 0 && mx < mapsRow.length) mapsRow[mx].materials[closest.colourSetId] += 1;
+      }
+      if (onProgress && (row + 1) % 16 === 0) {
+        onProgress((row + 1) / 128);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    // carry the last two rows (they contain the diffusion error for the next band)
+    let nextCarry = null;
+    if (this.isErrorDiffusionDither() && data.length >= (128 + 2) * width * 4) {
+      nextCarry = {
+        rows: [
+          new Uint8ClampedArray(data.subarray(128 * width * 4, 129 * width * 4)),
+          new Uint8ClampedArray(data.subarray(129 * width * 4, 130 * width * 4)),
+        ],
+      };
+    }
+    if (onProgress) onProgress(1);
+    return { maps: mapsRow, carry: nextCarry };
+  }
+
+  isErrorDiffusionDither() {
+    return window.MapArtConstants.ERROR_DIFFUSION_IDS.includes(this.ditherId);
+  }
+
+  /* applies carried diffusion errors to a band buffer (batch column processing).
+     colCarry holds `carryCols` columns (2 already-processed + 2 pending-error columns). */
+  applyBandCarries(bandData, bufferWidth, mapRow, rowCarry, colCarry, carryCols) {
+    if (!this.isErrorDiffusionDither()) return;
+    const cols = carryCols || 2;
+    if (rowCarry) {
+      for (let r = 0; r < 2; r++) {
+        if (rowCarry[r]) bandData.set(rowCarry[r], r * bufferWidth * 4);
+      }
+    } else if (colCarry) {
+      for (let r = 0; r < 2; r++) {
+        const src = (mapRow * 128 + r) * cols * 4;
+        bandData.set(colCarry.subarray(src, src + cols * 4), r * bufferWidth * 4);
+      }
+    }
+    if (colCarry) {
+      for (let r = 2; r < 128; r++) {
+        const src = (mapRow * 128 + r) * cols * 4;
+        bandData.set(colCarry.subarray(src, src + cols * 4), r * bufferWidth * 4);
+      }
+    }
+  }
+
+  /* copies the carry columns (the last `overlap` output columns + 2 pending-error columns)
+     of a processed band into the full-height column carry */
+  storeColumnCarry(bandData, bufferWidth, mapRow, colCarry, carryCols, carryStart) {
+    if (!this.isErrorDiffusionDither()) return;
+    const cols = carryCols || 2;
+    const startX = carryStart || 0;
+    for (let r = 0; r < 128; r++) {
+      const src = (r * bufferWidth + startX) * 4;
+      colCarry.set(bandData.subarray(src, src + cols * 4), (mapRow * 128 + r) * cols * 4);
+    }
+  }
+
+  // extracts the colour layouts of one map row from a band buffer (height = 128)
+  // xOffset: pixel offset of the first map column in the band buffer
+  extractColoursLayoutsBand(bandPixels, width, mapsX, xOffset) {
+    const off0 = xOffset || 0;
+    const layouts = [];
+    for (let mx = 0; mx < mapsX; mx++) {
+      const coloursLayout = [];
+      for (let columnNumber = 0; columnNumber < 128; columnNumber++) {
+        const column = [];
+        for (let rowNumber = 0; rowNumber < 128; rowNumber++) {
+          const offset = 4 * (rowNumber * width + off0 + mx * 128 + columnNumber);
+          const csAndTone = this.exactRGBToColourSetIdAndTone([bandPixels[offset], bandPixels[offset + 1], bandPixels[offset + 2]]);
+          column.push(csAndTone || { colourSetId: "-1", tone: "normal" });
+        }
+        coloursLayout.push(column);
+      }
+      layouts.push(coloursLayout);
+    }
+    return layouts;
+  }
+
+  /* ----- incremental merged litematic (batch mode, flat layout only) ----- */
+
+  initLitematicBatch(mapsX, mapsY) {
+    const K = window.MapArtConstants;
+    if (this.staircaseId !== K.STAIRCASING.OFF.id) {
+      throw new Error("分批计算模式下，合并 litematic 仅支持平面模式（阶梯模式文件体积过大）");
+    }
+    const colourSetIdsUsed = [];
+    for (const cs of this.colourSetsToUse) colourSetIdsUsed.push(cs.colourSetId);
+    colourSetIdsUsed.sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+    const palette = [{ name: "minecraft:air", args: {} }];
+    const idToPaletteIndex = {};
+    for (const csId of colourSetIdsUsed) {
+      const { name, args } = this.blockNBTNameAndArgs(csId, this.selectedBlocks[csId]);
+      palette.push({ name, args });
+      idToPaletteIndex[csId] = palette.length - 1;
+    }
+    const hasScaffold = this.supportModeId !== K.SUPPORT_MODES.NONE.id || this.includeNoobline;
+    if (hasScaffold) {
+      palette.push({ name: "minecraft:" + this.supportBlock.toLowerCase(), args: {} });
+      idToPaletteIndex.NOOBLINE_SCAFFOLD = palette.length - 1;
+    }
+    const zBase = this.includeNoobline ? 1 : 0;
+    const maxY = this.supportModeId === K.SUPPORT_MODES.NONE.id ? 0 : 2;
+    const sx = 128 * mapsX;
+    const sy = maxY + 1;
+    const sz = 128 * mapsY + zBase;
+    const bits = Math.max(2, 32 - Math.clz32(palette.length - 1));
+    const longs = new Uint8Array(Math.ceil((sx * sy * sz * bits) / 64) * 8);
+    return { palette, idToPaletteIndex, bits, longs, sx, sy, sz, zBase, version: this.mcVersion };
+  }
+
+  // layouts: array of layouts for this map row (each [x][z] of {colourSetId, tone})
+  // mapColStart: global map column index of layouts[0] (for partial-width batches)
+  addLitematicBatchRow(state, layouts, mapRowIndex, mapColStart) {
+    const K = window.MapArtConstants;
+    const view = new DataView(state.longs.buffer);
+    const zOffset = mapRowIndex * 128;
+    const colStart = mapColStart || 0;
+    for (let mx = 0; mx < layouts.length; mx++) {
+      const layout = layouts[mx];
+      for (let columnNumber = 0; columnNumber < layout.length; columnNumber++) {
+        const globalX = (colStart + mx) * 128 + columnNumber;
+        const physicalColumn = this.buildPhysicalColumn(globalX, layout[columnNumber]);
+        for (const b of physicalColumn) {
+          if (b.csId === "NOOBLINE_SCAFFOLD" && b.z === 0 && mapRowIndex > 0) continue; // noobline only exists once
+          const globalZ = b.z + zOffset;
+          const index = b.y * state.sx * state.sz + globalZ * state.sx + b.x;
+          writePackedEntry(view, state.bits, index, state.idToPaletteIndex[b.csId]);
+        }
+      }
+    }
+  }
+
+  finishLitematicBatch(state, baseName, author) {
+    const K = window.MapArtConstants;
+    const now = Date.now();
+    const version = K.SUPPORTED_VERSIONS.find((v) => v.MCVersion === state.version);
+    const vec3i = (v) => ({
+      type: 10,
+      value: {
+        x: { type: 3, value: v[0] },
+        y: { type: 3, value: v[1] },
+        z: { type: 3, value: v[2] },
+      },
+    });
+    const paletteTag = state.palette.map((p) => {
+      const item = { Name: { type: 8, value: p.name } };
+      if (p.args && Object.keys(p.args).length) {
+        const props = {};
+        Object.keys(p.args).forEach((k) => (props[k] = { type: 8, value: p.args[k] }));
+        item.Properties = { type: 10, value: props };
+      }
+      return item;
+    });
+    const size = [state.sx, state.sy, state.sz];
+    const region = {
+      DataVersion: { type: 3, value: version.NBTVersion },
+      BlockStatePalette: { type: 9, value: { type: 10, value: paletteTag } },
+      BlockStates: { type: 12, value: state.longs },
+      Position: vec3i([0, 0, 0]),
+      Size: vec3i(size),
+    };
+    const root = {
+      name: "Schematic",
+      value: {
+        Version: { type: 3, value: 4 },
+        MinecraftDataVersion: { type: 3, value: version.NBTVersion },
+        Metadata: {
+          type: 10,
+          value: {
+            Name: { type: 8, value: baseName || "MapArt" },
+            Author: { type: 8, value: author || "MapArt Generator" },
+            Description: { type: 8, value: "Generated by MC Map Art Generator (batch)" },
+            SchematicVersion: { type: 3, value: 4 },
+            TimeCreated: { type: 4, value: longFromMs(now) },
+            TimeModified: { type: 4, value: longFromMs(now) },
+            EnclosingSize: vec3i(size),
+            McDataVersion: { type: 3, value: version.NBTVersion },
+            McVersion: { type: 8, value: state.version },
+            RegionCount: { type: 3, value: 1 },
+            EntityCount: { type: 3, value: 0 },
+            TotalVolume: { type: 4, value: longFromMs(state.sx * state.sy * state.sz) },
+            TotalBlocks: { type: 4, value: longFromMs(0) },
+            BlockEntityCount: { type: 4, value: longFromMs(0) },
+            BlockTickCount: { type: 4, value: longFromMs(0) },
+          },
+        },
+        Regions: { type: 10, value: { mapart: { type: 10, value: region } } },
+      },
+    };
+    const writer = new NBTWriterCtor();
+    writer.writeTopLevelCompound(root.name, root.value);
+    return gzipBytes(new Uint8Array(writer.getData()));
+  }
+
+  /* ----- new dithering algorithms ----- */
+
+  isOrderedDitherId(ditherId) {
+    const D = window.MapArtConstants.DITHER_METHODS;
+    return [D.Bayer44.id, D.Bayer22.id, D.Ordered33.id, D.Bayer88.id, D.BlueNoise.id].includes(ditherId);
+  }
+
+  ditherLevelsFor(ditherId) {
+    const D = window.MapArtConstants.DITHER_METHODS;
+    if (ditherId === D.BlueNoise.id) return 256;
+    const m = Object.values(D).find((x) => x.id === ditherId);
+    return m && m.levels ? m.levels : 16;
+  }
+
+  ditherThresholdAt(ditherId, x, y) {
+    const D = window.MapArtConstants.DITHER_METHODS;
+    if (ditherId === D.BlueNoise.id && this.blueNoise) {
+      const s = this.blueNoise.size;
+      return this.blueNoise.matrix[y % s][x % s];
+    }
+    const m = this.dither ? this.dither.ditherMatrix : null;
+    if (m) return m[y % m.length][x % m[0].length];
+    const b = D.Bayer88.ditherMatrix;
+    return b[y % 8][x % 8];
+  }
+
+  /* Yliluoma's ordered dithering: pick the optimal palette pair + mixing ratio for this colour.
+     useBlueNoise: use the 64x64 blue noise mask instead of the Bayer 8x8 matrix. */
+  yliluomaChoose(pixelRGB, x, y, useBlueNoise) {
+    const palette = this.yliluomaPalette;
+    if (palette.length === 0) return { colourSetId: "-1", tone: "normal" };
+    const key = (pixelRGB[0] << 16) + (pixelRGB[1] << 8) + pixelRGB[2];
+    let plan = this.yliluomaCache.get(key);
+    if (!plan) {
+      plan = this.deviseYliluomaPlan(pixelRGB, palette);
+      if (this.yliluomaCache.size > 1000000) this.yliluomaCache.clear();
+      this.yliluomaCache.set(key, plan);
+    }
+    let t;
+    if (useBlueNoise && this.blueNoise) {
+      const s = this.blueNoise.size;
+      t = this.blueNoise.matrix[y % s][x % s] / 256;
+    } else {
+      const m = window.MapArtConstants.DITHER_METHODS.Bayer88.ditherMatrix;
+      t = m[y % 8][x % 8] / 64;
+    }
+    return t < plan.ratio ? plan.c2 : plan.c1;
+  }
+
+  deviseYliluomaPlan(pixelRGB, palette) {
+    const n = palette.length;
+    const K = Math.min(12, n);
+    // keep the K nearest palette entries in an insertion-sorted list (no per-step sort allocations)
+    const candIdx = new Int32Array(K);
+    const candDist = new Float64Array(K);
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      const d = this.squaredEuclideanMetricColours(palette[i].rgb, pixelRGB);
+      if (count < K) {
+        let p = count++;
+        while (p > 0 && candDist[p - 1] > d) {
+          candDist[p] = candDist[p - 1];
+          candIdx[p] = candIdx[p - 1];
+          p--;
+        }
+        candDist[p] = d;
+        candIdx[p] = i;
+      } else if (d < candDist[K - 1]) {
+        let p = K - 1;
+        while (p > 0 && candDist[p - 1] > d) {
+          candDist[p] = candDist[p - 1];
+          candIdx[p] = candIdx[p - 1];
+          p--;
+        }
+        candDist[p] = d;
+        candIdx[p] = i;
+      }
+    }
+    let bestPlan = { c1: palette[candIdx[0]], c2: palette[candIdx[0]], ratio: 1 };
+    let bestPenalty = Infinity;
+    const weights = [299, 587, 114];
+    for (let a = 0; a < count; a++) {
+      for (let b = a; b < count; b++) {
+        const c1 = palette[candIdx[a]].rgb;
+        const c2 = palette[candIdx[b]].rgb;
+        let ratio = 0.5;
+        if (c1[0] !== c2[0] || c1[1] !== c2[1] || c1[2] !== c2[2]) {
+          let num = 0;
+          let den = 0;
+          for (let ch = 0; ch < 3; ch++) {
+            if (c2[ch] !== c1[ch]) {
+              num += weights[ch] * ((pixelRGB[ch] - c1[ch]) / (c2[ch] - c1[ch]));
+              den += weights[ch];
+            }
+          }
+          ratio = den > 0 ? Math.max(0, Math.min(1, num / den)) : 0.5;
+        }
+        const mixed = [
+          c1[0] + ratio * (c2[0] - c1[0]),
+          c1[1] + ratio * (c2[1] - c1[1]),
+          c1[2] + ratio * (c2[2] - c1[2]),
+        ];
+        const penalty =
+          this.yliluomaColorCompare(pixelRGB, mixed) +
+          this.yliluomaColorCompare(c1, c2) * 0.1 * (Math.abs(ratio - 0.5) + 0.5);
+        if (penalty < bestPenalty) {
+          bestPenalty = penalty;
+          bestPlan = { c1: palette[candIdx[a]], c2: palette[candIdx[b]], ratio };
+        }
+      }
+    }
+    return bestPlan;
+  }
+
+  /* luminance-weighted colour difference from the Yliluoma paper */
+  yliluomaColorCompare(c1, c2) {
+    const luma1 = (c1[0] * 299 + c1[1] * 587 + c1[2] * 114) / (255.0 * 1000);
+    const luma2 = (c2[0] * 299 + c2[1] * 587 + c2[2] * 114) / (255.0 * 1000);
+    const lumadiff = luma1 - luma2;
+    const dr = (c1[0] - c2[0]) / 255.0;
+    const dg = (c1[1] - c2[1]) / 255.0;
+    const db = (c1[2] - c2[2]) / 255.0;
+    return (dr * dr * 0.299 + dg * dg * 0.587 + db * db * 0.114) * 0.75 + lumadiff * lumadiff;
+  }
+
+  /* Riemersma dithering: error diffusion along a Hilbert curve with a 16-entry error queue */
+  async processRiemersma(data, maps, W, H, onProgress) {
+    await this.ensureLut(onProgress ? (p) => onProgress(p * 0.3) : null);
+    const progressScale = this.lut ? 0.3 : 0;
+    const report = onProgress ? (p) => onProgress(progressScale + (1 - progressScale) * p) : null;
+    const size = 1 << Math.ceil(Math.log2(Math.max(W, H)));
+    const weights = [];
+    for (let i = 0; i < 16; i++) weights.push(Math.pow(0.5, i + 1));
+    const errors = []; // newest first
+    const maxErrors = 16;
+    const total = size * size;
+    const yieldEvery = Math.max(4096, Math.floor((W * H) / 250));
+    let steps = 0;
+
+    for (let d = 0; d < total; d++) {
+      const pos = hilbertD2XY(size, d);
+      const x = pos[0];
+      const y = pos[1];
+      if (x >= W || y >= H) continue;
+      const i = (y * W + x) * 4;
+      const whichMap_x = Math.floor(x / 128);
+      const whichMap_y = Math.floor(y / 128);
+
+      if (this.artW > 0 && (x >= this.artW || y >= this.artH)) {
+        data[i] = 0;
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+        data[i + 3] = 0;
+        errors.unshift([0, 0, 0]);
+        if (errors.length > maxErrors) errors.pop();
+      } else if (this.transparency && data[i + 3] < this.transparencyTolerance) {
+        data[i] = 0;
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+        data[i + 3] = 0;
+        errors.unshift([0, 0, 0]);
+        if (errors.length > maxErrors) errors.pop();
+      } else {
+        data[i + 3] = 255;
+        let r = data[i];
+        let g = data[i + 1];
+        let b = data[i + 2];
+        for (let e = 0; e < errors.length; e++) {
+          const w = weights[e];
+          r += errors[e][0] * w;
+          g += errors[e][1] * w;
+          b += errors[e][2] * w;
+        }
+        const target = [clampByte(r), clampByte(g), clampByte(b)];
+        const closest = this.findClosestColourSetIdAndToneTo(target);
+        const c = this.colourSetIdAndToneToRGB(closest.colourSetId, closest.tone);
+        data[i] = c[0];
+        data[i + 1] = c[1];
+        data[i + 2] = c[2];
+        errors.unshift([target[0] - c[0], target[1] - c[1], target[2] - c[2]]);
+        if (errors.length > maxErrors) errors.pop();
+        maps[whichMap_y][whichMap_x].materials[closest.colourSetId] += 1;
+      }
+
+      steps++;
+      if (onProgress && steps % yieldEvery === 0) {
+        report(steps / (W * H));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    if (this.isolatedCleanup) {
+      this.suppressIsolatedPixels(data, W, H);
+      this.recountMaterials(data, maps, W, H);
+    }
+    if (onProgress) onProgress(1);
+    return { maps };
+  }
+
+  /* ----- isolated pixel suppression (post-process) ----- */
+
+  /* replaces pixels that have no same-colour 4-neighbour with the most similar neighbour colour */
+  suppressIsolatedPixels(data, W, H) {
+    for (let pass = 0; pass < this.isolatedPasses; pass++) {
+      const copy = new Uint8ClampedArray(data);
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          if (copy[i + 3] === 0) continue;
+          const r = copy[i];
+          const g = copy[i + 1];
+          const b = copy[i + 2];
+          let same = 0;
+          let best = null;
+          let bestD = Infinity;
+          for (let k = 0; k < 4; k++) {
+            const nx = x + (k === 0 ? 1 : k === 1 ? -1 : 0);
+            const ny = y + (k === 2 ? 1 : k === 3 ? -1 : 0);
+            if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+            const j = (ny * W + nx) * 4;
+            if (copy[j + 3] === 0) continue;
+            if (copy[j] === r && copy[j + 1] === g && copy[j + 2] === b) same++;
+            const d = this.squaredEuclideanMetricColours([r, g, b], [copy[j], copy[j + 1], copy[j + 2]]);
+            if (d < bestD) {
+              bestD = d;
+              best = [copy[j], copy[j + 1], copy[j + 2]];
+            }
+          }
+          if (same === 0 && best) {
+            data[i] = best[0];
+            data[i + 1] = best[1];
+            data[i + 2] = best[2];
+          }
+        }
+      }
+    }
+  }
+
+  /* rebuild per-map material counts after post-processing */
+  recountMaterials(data, maps, W, H) {
+    for (const row of maps) {
+      for (const map of row) {
+        for (const k of Object.keys(map.materials)) map.materials[k] = 0;
+      }
+    }
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        if (data[i + 3] === 0) continue;
+        const cs = this.exactRGBToColourSetIdAndTone([data[i], data[i + 1], data[i + 2]]);
+        if (!cs || cs.colourSetId === "-1") continue;
+        const whichMap_x = Math.floor(x / 128);
+        const whichMap_y = Math.floor(y / 128);
+        maps[whichMap_y][whichMap_x].materials[cs.colourSetId] = (maps[whichMap_y][whichMap_x].materials[cs.colourSetId] || 0) + 1;
+      }
+    }
   }
 
   /* ----- step 2: extract coloursLayout per map ----- */
@@ -362,6 +1138,28 @@ class MapGenerator {
       }
     }
     return maps;
+  }
+
+  // crops one cell layout [x][z] to cw x ch (block-size mode, non 128-aligned art)
+  cropColoursLayout(layout, cw, ch) {
+    const out = [];
+    for (let x = 0; x < cw; x++) out.push(layout[x].slice(0, ch));
+    return out;
+  }
+
+  // crops all extracted cell layouts to the actual artwork size (block-size mode)
+  cropColoursLayouts(maps, artW, artH) {
+    const out = [];
+    for (let my = 0; my < maps.length; my++) {
+      const row = [];
+      for (let mx = 0; mx < maps[my].length; mx++) {
+        const cw = Math.max(0, Math.min(128, artW - mx * 128));
+        const ch = Math.max(0, Math.min(128, artH - my * 128));
+        row.push(Object.assign({}, maps[my][mx], { coloursLayout: this.cropColoursLayout(maps[my][mx].coloursLayout, cw, ch) }));
+      }
+      out.push(row);
+    }
+    return out;
   }
 
   /* ----- step 3: physical layout (blocks) ----- */
@@ -597,20 +1395,40 @@ class MapGenerator {
 
   // Builds the physical layout of the merged image (all maps) without materializing
   // the whole merged coloursLayout (memory-friendly for big art).
-  // maps: mapsY x mapsX, each .coloursLayout is [x 0..127][z 0..127]
+  // maps: mapsY x mapsX, each .coloursLayout is [x][z]; cell sizes may be smaller than
+  // 128 at the right/bottom edge (block-size mode).
   buildMergedPhysicalLayout(maps) {
     const mapsX = maps[0].length;
     const mapsY = maps.length;
+    // per-column cell widths and x offsets
+    const colW = [];
+    const colOff = [];
+    let totalW = 0;
+    for (let mx = 0; mx < mapsX; mx++) {
+      colW.push(maps[0][mx].coloursLayout.length);
+      colOff.push(totalW);
+      totalW += colW[mx];
+    }
+    // per-row cell heights and z offsets
+    const rowH = [];
+    const rowOff = [];
+    let totalH = 0;
+    for (let my = 0; my < mapsY; my++) {
+      rowH.push(maps[my][0].coloursLayout[0].length);
+      rowOff.push(totalH);
+      totalH += rowH[my];
+    }
     const blocks = [];
     let supportCount = 0;
     let maxHeight = 0;
-    for (let x = 0; x < 128 * mapsX; x++) {
-      const mx = Math.floor(x / 128);
-      const xInCell = x % 128;
+    let mx = 0;
+    for (let x = 0; x < totalW; x++) {
+      while (mx < mapsX - 1 && x >= colOff[mx] + colW[mx]) mx++;
+      const xInCell = x - colOff[mx];
       const column = [];
       for (let my = 0; my < mapsY; my++) {
         const cell = maps[my][mx].coloursLayout[xInCell];
-        for (let z = 0; z < 128; z++) column.push(cell[z]);
+        for (let z = 0; z < rowH[my]; z++) column.push(cell[z]);
       }
       const physicalColumn = this.buildPhysicalColumn(x, column);
       for (const block of physicalColumn) {
@@ -622,8 +1440,8 @@ class MapGenerator {
         if (columnMax > maxHeight) maxHeight = columnMax;
       }
     }
-    const depth = 128 * mapsY + (this.includeNoobline ? 1 : 0);
-    const size = [128 * mapsX, maxHeight + 1, depth];
+    const depth = totalH + (this.includeNoobline ? 1 : 0);
+    const size = [totalW, maxHeight + 1, depth];
     return { blocks, size, supportCount };
   }
 
@@ -827,55 +1645,7 @@ class MapGenerator {
     // index = y*sx*sz + z*sx + x, tight LSB-first packing (matches TightLongBackedIntArray)
     // IMPORTANT: the long array is stored BIG-ENDIAN like all NBT longs (hi word first, lo word last).
     // max entry width is 32 bits, so an entry spans at most two 64-bit words
-    const setEntry = (index, value) => {
-      const startOffset = index * bits;
-      const startArr = Math.floor(startOffset / 64);
-      const bitOffset = startOffset % 64;
-      value &= (1 << bits) - 1;
-      const loWord = startArr * 8 + 4; // big-endian: lo word is the LAST 4 bytes of the long
-      const hiWord = startArr * 8; // big-endian: hi word is the FIRST 4 bytes of the long
-      if (bitOffset + bits <= 64) {
-        if (bitOffset + bits <= 32) {
-          // all bits in the low word
-          let w = longsView.getUint32(loWord, false);
-          w = (w & ~(((1 << bits) - 1) << bitOffset)) >>> 0;
-          w = (w | (value << bitOffset)) >>> 0;
-          longsView.setUint32(loWord, w, false);
-        } else if (bitOffset >= 32) {
-          // all bits in the high word
-          const wb = bitOffset - 32;
-          let w = longsView.getUint32(hiWord, false);
-          w = (w & ~(((1 << bits) - 1) << wb)) >>> 0;
-          w = (w | (value << wb)) >>> 0;
-          longsView.setUint32(hiWord, w, false);
-        } else {
-          // spans low and high word of the same long
-          const firstBits = 32 - bitOffset;
-          const rest = bits - firstBits;
-          let lo = longsView.getUint32(loWord, false);
-          let hi = longsView.getUint32(hiWord, false);
-          lo = (lo & ~(((1 << firstBits) - 1) << bitOffset)) >>> 0;
-          lo = (lo | ((value & ((1 << firstBits) - 1)) << bitOffset)) >>> 0;
-          hi = (hi & ~((1 << rest) - 1)) >>> 0;
-          hi = (hi | (value >>> firstBits)) >>> 0;
-          longsView.setUint32(loWord, lo, false);
-          longsView.setUint32(hiWord, hi, false);
-        }
-      } else {
-        // crosses into the next long: bits end in the hi word of current long, rest in lo word of next long
-        const firstBits = 64 - bitOffset;
-        const rest = bits - firstBits;
-        const wb = bitOffset - 32;
-        let hi = longsView.getUint32(hiWord, false);
-        hi = (hi & ~(((1 << firstBits) - 1) << wb)) >>> 0;
-        hi = (hi | ((value & ((1 << firstBits) - 1)) << wb)) >>> 0;
-        longsView.setUint32(hiWord, hi, false);
-        let nlo = longsView.getUint32((startArr + 1) * 8 + 4, false);
-        nlo = (nlo & ~((1 << rest) - 1)) >>> 0;
-        nlo = (nlo | (value >>> firstBits)) >>> 0;
-        longsView.setUint32((startArr + 1) * 8 + 4, nlo, false);
-      }
-    };
+    const setEntry = (index, value) => writePackedEntry(longsView, bits, index, value);
 
     // place blocks
     for (const b of blocks) {
