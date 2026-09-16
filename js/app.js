@@ -1131,7 +1131,7 @@
     const wrap = $("canvasWrap");
     if (!canvas.width || !canvas.height) return;
     const availW = Math.max(64, wrap.clientWidth);
-    const availH = Math.max(200, window.innerHeight - 330);
+    const availH = Math.max(200, window.innerHeight - 260);
     const ar = canvas.width / canvas.height;
     let w = availW;
     let h = w / ar;
