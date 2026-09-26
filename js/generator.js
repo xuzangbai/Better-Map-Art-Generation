@@ -176,6 +176,9 @@ class MapGenerator {
     this.mapdatUnobtainable = !!opts.mapdatUnobtainable;
     this.wallMode = !!opts.wallMode; // vertical wall pixel art (image rows -> Y, 1 block thick)
     this.serpentine = !!opts.serpentine; // alternate scan direction for error diffusion
+    // error-diffusion strength in percent (0..200; 100 = standard, 0 = no error propagation)
+    this.diffusionStrength = opts.diffusionStrength === undefined ? 100 : opts.diffusionStrength;
+    this.diffusionScale = this.diffusionStrength / 100;
     // block-size mode: the artwork only covers the top-left artW x artH region of the
     // (128-aligned) canvas; everything outside stays empty (0 = no limit)
     this.artW = opts.artW || 0;
@@ -540,7 +543,8 @@ class MapGenerator {
       closestColourSetIdAndTone = this.findClosestColourSetIdAndToneTo(oldPixel);
       const c = this.colourSetIdAndToneToRGB(closestColourSetIdAndTone.colourSetId, closestColourSetIdAndTone.tone);
       data[i] = c[0]; data[i + 1] = c[1]; data[i + 2] = c[2];
-      const quant_error = [oldPixel[0] - c[0], oldPixel[1] - c[1], oldPixel[2] - c[2]];
+      const es = this.diffusionScale;
+      const quant_error = [(oldPixel[0] - c[0]) * es, (oldPixel[1] - c[1]) * es, (oldPixel[2] - c[2]) * es];
       const m = ditherMatrix;
       const dv = divisor;
       const dir = serpentine && yGlobal % 2 === 1 ? -1 : 1;
@@ -1033,7 +1037,8 @@ class MapGenerator {
         data[i] = c[0];
         data[i + 1] = c[1];
         data[i + 2] = c[2];
-        errors.unshift([target[0] - c[0], target[1] - c[1], target[2] - c[2]]);
+        const es = this.diffusionScale;
+        errors.unshift([(target[0] - c[0]) * es, (target[1] - c[1]) * es, (target[2] - c[2]) * es]);
         if (errors.length > maxErrors) errors.pop();
         maps[whichMap_y][whichMap_x].materials[closest.colourSetId] += 1;
       }

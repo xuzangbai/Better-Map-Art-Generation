@@ -1155,6 +1155,61 @@ function expandLongPackedArray(bytes, bitsPerItem, length) {
     assert(msize32[0] === 200 && msize32[2] === 140, "multi-cell merged NBT size is 200 x 140 (got " + JSON.stringify(msize32) + ")");
   }
 
+  console.log("=== Test 32: error-diffusion strength ===");
+  {
+    const img32 = makeTestImage(1, 1, (x, y, w, h) => [Math.floor((x / w) * 255), Math.floor((y / h) * 255), (x + y) % 256]);
+
+    // strength 0 must behave exactly like "no dithering"
+    const gNone32 = makeGenerator({ ditherId: K.DITHER_METHODS.None.id });
+    gNone32.setup();
+    const dNone32 = new Uint8ClampedArray(img32.data);
+    await gNone32.processImageData({ data: dNone32, width: 128 }, 1, 1);
+
+    const gZero32 = makeGenerator({ ditherId: K.DITHER_METHODS.FloydSteinberg.id, diffusionStrength: 0 });
+    gZero32.setup();
+    const dZero32 = new Uint8ClampedArray(img32.data);
+    await gZero32.processImageData({ data: dZero32, width: 128 }, 1, 1);
+    let diffZero32 = 0;
+    for (let i = 0; i < dNone32.length; i++) if (dNone32[i] !== dZero32[i]) diffZero32++;
+    assert(diffZero32 === 0, "strength 0 == no dithering (diff bytes=" + diffZero32 + ")");
+
+    const run32 = async (overrides) => {
+      const g = makeGenerator(Object.assign({ ditherId: K.DITHER_METHODS.FloydSteinberg.id }, overrides));
+      g.setup();
+      const d = new Uint8ClampedArray(img32.data);
+      await g.processImageData({ data: d, width: 128 }, 1, 1);
+      return d;
+    };
+    const dFull32 = await run32({ diffusionStrength: 100 });
+    const dDefault32 = await run32({});
+    let diffDefault32 = 0;
+    for (let i = 0; i < dFull32.length; i++) if (dFull32[i] !== dDefault32[i]) diffDefault32++;
+    assert(diffDefault32 === 0, "default strength is 100% (diff bytes=" + diffDefault32 + ")");
+
+    const dHalf32 = await run32({ diffusionStrength: 50 });
+    let diffHalf32 = 0;
+    for (let i = 0; i < dFull32.length; i++) if (dFull32[i] !== dHalf32[i]) diffHalf32++;
+    assert(diffHalf32 > 0, "strength 50% differs from 100% (diff bytes=" + diffHalf32 + ")");
+
+    const dStrong32 = await run32({ diffusionStrength: 150 });
+    let diffStrong32 = 0;
+    for (let i = 0; i < dFull32.length; i++) if (dFull32[i] !== dStrong32[i]) diffStrong32++;
+    assert(diffStrong32 > 0, "strength 150% differs from 100% (diff bytes=" + diffStrong32 + ")");
+
+    // all strengths still produce valid palette colours
+    let invalid32 = 0;
+    for (const d of [dHalf32, dStrong32]) {
+      for (let y = 0; y < 128; y++) {
+        for (let x = 0; x < 128; x++) {
+          const i = (y * 128 + x) * 4;
+          const cs = gZero32.exactRGBToColourSetIdAndTone([d[i], d[i + 1], d[i + 2]]);
+          if (!cs || cs.colourSetId === "-1") invalid32++;
+        }
+      }
+    }
+    assert(invalid32 === 0, "custom strengths output valid palette colours (invalid=" + invalid32 + ")");
+  }
+
 })().catch((e) => {
   console.error("Test harness error:", e);
   process.exit(1);

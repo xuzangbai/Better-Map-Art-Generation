@@ -44,9 +44,12 @@
     bgMode: K.BACKGROUND_MODES.OFF.id,
     bgColor: "#151515",
     showGrid: true,
-    staircase: K.STAIRCASING.CLASSIC.id,
+    showGridLabels: true, // draw map_x_y coordinates on the preview grid
+    showHoverInfo: true, // show the pixel info tooltip on hover
+    staircase: K.STAIRCASING.OFF.id,
     dither: K.DITHER_METHODS.FloydSteinberg.id,
     serpentine: false,
+    diffusionStrength: 100, // error-diffusion strength in percent (0..200)
     colourMetric: "lab",
     gpuAccel: false,
     isolatedCleanup: false,
@@ -56,6 +59,7 @@
     transparencyThreshold: 128,
     mapdatUseId: true,
     mapdatIdStart: 0,
+    exportName: "", // custom export base name ("" = follow the uploaded image name)
     supportMode: K.SUPPORT_MODES.NONE.id,
     supportBlock: "cobblestone",
     includeNoobline: false,
@@ -71,6 +75,7 @@
     generating: false,
     blockSearch: "",
     batch: null, // active batch calculation state
+    tipTimer: null, // preview tooltip auto-hide timer (touch)
   };
 
   /* ---------------- init ---------------- */
@@ -143,6 +148,8 @@
     bindEvents();
     // sync checkbox/radio UI with initial state
     $("showGrid").checked = state.showGrid;
+    $("showGridLabels").checked = state.showGridLabels;
+    $("showHoverInfo").checked = state.showHoverInfo;
     $("mapdatUseId").checked = state.mapdatUseId;
     $("transparentBg").checked = state.transparentBg;
     $("transparencyThresholdField").hidden = !state.transparentBg;
@@ -165,7 +172,10 @@
       $("gpuAccel").checked = state.gpuAccel;
     }
     updateSerpentineVisibility();
+    $("diffusionStrength").value = state.diffusionStrength;
+    updateDiffusionVisibility();
     $("toolBadge").textContent = "工具 " + K.TOOL_VERSION;
+    $("exportName").value = state.exportName;
     updateSizeHint();
     updateGenUI();
     updateMapdatOptsVisibility();
@@ -276,6 +286,7 @@
     $("dither").addEventListener("change", (e) => {
       state.dither = parseInt(e.target.value, 10);
       updateSerpentineVisibility();
+      updateDiffusionVisibility();
       schedulePreview();
     });
     $("supportMode").addEventListener("change", (e) => {
@@ -296,6 +307,7 @@
     bindSlider("contrast", "contrastVal", (v) => v + "%", (v) => (state.contrast = v));
     bindSlider("saturation", "saturationVal", (v) => v + "%", (v) => (state.saturation = v));
     bindSlider("transparencyThreshold", "transparencyThresholdVal", (v) => v, (v) => (state.transparencyThreshold = v));
+    bindSlider("diffusionStrength", "diffusionVal", (v) => v + "%", (v) => (state.diffusionStrength = v));
 
     bindCheck("serpentine", (v) => (state.serpentine = v));
 
@@ -325,10 +337,28 @@
     });
     bindCheck("includeNoobline", (v) => (state.includeNoobline = v));
     bindCheck("showGrid", (v) => (state.showGrid = v));
+    $("showGridLabels").addEventListener("change", (e) => {
+      state.showGridLabels = e.target.checked;
+      drawPreview();
+    });
+    $("showHoverInfo").addEventListener("change", (e) => {
+      state.showHoverInfo = e.target.checked;
+      if (!state.showHoverInfo) hidePreviewTip();
+    });
 
     $("bgColor").addEventListener("input", (e) => {
       state.bgColor = e.target.value;
       schedulePreview();
+    });
+    $("exportName").addEventListener("input", (e) => {
+      state.exportName = e.target.value;
+      updateGenName();
+    });
+    $("exportName").addEventListener("change", (e) => {
+      const clean = sanitizeFileName(e.target.value);
+      state.exportName = clean;
+      e.target.value = clean;
+      updateGenName();
     });
     $("supportBlock").addEventListener("change", (e) => {
       const v = e.target.value.trim().toLowerCase().replace(/^minecraft:/, "").replace(/[^a-z0-9_]/g, "");
@@ -434,11 +464,22 @@
       toast("已取消分批计算");
     });
 
+    // preview hover tooltip (pixel colour / block info)
+    const previewEl = $("preview");
+    previewEl.addEventListener("mousemove", showPreviewTip);
+    previewEl.addEventListener("mouseleave", hidePreviewTip);
+    previewEl.addEventListener("click", (e) => {
+      // touch devices: tapping shows the info for a moment
+      showPreviewTip(e);
+      clearTimeout(state.tipTimer);
+      state.tipTimer = setTimeout(hidePreviewTip, 2500);
+    });
+
     // keep the preview fitted when the window size changes
     let resizeTimer = null;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(fitPreviewCanvas, 120);
+      resizeTimer = setTimeout(drawPreview, 120);
     });
   }
 
@@ -672,9 +713,28 @@
   /* ---------------- settings helpers ---------------- */
 
   function getBaseName() {
-    let name = (state.imageName || "mapart").replace(/\.[^.]+$/, "");
-    name = name.replace(/[^\w\u4e00-\u9fa5-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+    const custom = sanitizeFileName(state.exportName);
+    if (custom) return custom;
+    let name = sanitizeFileName((state.imageName || "mapart").replace(/\.[^.]+$/, ""));
     return name || "mapart";
+  }
+
+  /* keeps any language (Japanese, Korean, Cyrillic, emoji, ...) and only strips
+     characters that are illegal or problematic in file names */
+  function sanitizeFileName(name) {
+    let s = String(name || "")
+      // forbidden characters + control chars + zero-width / bidi marks
+      .replace(/[\\/:*?"<>|\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]+/g, "-")
+      .replace(/[\u2028\u2029]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/-+/g, "-")
+      // Windows: no leading/trailing dots, spaces or hyphens
+      .replace(/^[.\s-]+/, "")
+      .replace(/[.\s-]+$/, "");
+    // Windows reserved device names
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(s)) s = "_" + s;
+    return s;
   }
 
   function getSelectedFormats() {
@@ -809,6 +869,8 @@
     $("staircaseField").style.display = isWall ? "none" : "";
     $("supportPanel").style.display = isWall ? "none" : "";
     updateSizeHint();
+    updateSerpentineVisibility();
+    updateDiffusionVisibility();
     syncBlockSizeUI();
     updateBatchSizeVisibility();
     updateGenUI();
@@ -826,6 +888,8 @@
 
 
   function updateGenName() {
+    const derived = sanitizeFileName((state.imageName || "").replace(/\.[^.]+$/, "")) || "mapart";
+    $("exportName").placeholder = state.image ? "默认：" + derived : "默认使用上传的图片文件名";
     $("genName").textContent = getBaseName();
   }
 
@@ -864,6 +928,15 @@
     $("serpentineField").hidden = !isSerpentineApplicable();
   }
 
+  /* the diffusion strength applies to error-diffusion methods and Riemersma */
+  function isDiffusionApplicable() {
+    return K.ERROR_DIFFUSION_IDS.includes(state.dither) || state.dither === K.DITHER_METHODS.Riemersma.id;
+  }
+
+  function updateDiffusionVisibility() {
+    $("diffusionField").hidden = !isDiffusionApplicable();
+  }
+
   /* sizes above 64x64 maps automatically use batch calculation */
   function isBatchMode() {
     return state.layoutMode !== "wall" && state.mapsX * state.mapsY > BATCH_THRESHOLD_MAPS;
@@ -887,6 +960,7 @@
       s: state.layoutMode === "wall" ? -1 : state.staircase,
       d: state.dither,
       serp: state.serpentine && isSerpentineApplicable(),
+      ds: state.diffusionStrength,
       cm: state.colourMetric,
       gpu: state.gpuAccel,
       ic: state.isolatedCleanup && state.isolatedPasses,
@@ -931,6 +1005,7 @@
       mapdatUnobtainable: state.mapdatUnobtainable,
       wallMode: state.layoutMode === "wall",
       serpentine: state.serpentine && isSerpentineApplicable(),
+      diffusionStrength: state.diffusionStrength,
       artW: isBlockSizeActive() ? state.blockW : 0,
       artH: isBlockSizeActive() ? state.blockH : 0,
     }, overrides || {}));
@@ -1125,11 +1200,11 @@
   }
 
   // scales the canvas to fill the available width, but caps it so the whole preview
-  // panel stays visible without scrolling (aspect ratio preserved)
+  // panel stays visible without scrolling (aspect ratio preserved); returns the applied size
   function fitPreviewCanvas() {
     const canvas = $("preview");
     const wrap = $("canvasWrap");
-    if (!canvas.width || !canvas.height) return;
+    if (!canvas.width || !canvas.height) return { w: 0, h: 0 };
     const availW = Math.max(64, wrap.clientWidth);
     const availH = Math.max(200, window.innerHeight - 260);
     const ar = canvas.width / canvas.height;
@@ -1139,8 +1214,10 @@
       h = availH;
       w = h * ar;
     }
-    canvas.style.width = Math.round(w) + "px";
-    canvas.style.height = Math.round(h) + "px";
+    const size = { w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) };
+    canvas.style.width = size.w + "px";
+    canvas.style.height = size.h + "px";
+    return size;
   }
 
   function drawPreview() {
@@ -1170,26 +1247,132 @@
     const imgData = new ImageData(new Uint8ClampedArray(state.quantized.pixels), tw, th);
     ctx.putImageData(imgData, 0, 0, 0, 0, artW, artH);
 
+    // the bitmap gets scaled by CSS, so widen the grid lines when the preview is
+    // displayed smaller than the artwork (otherwise downscaling drops them)
+    const dispW = fitPreviewCanvas().w || artW;
     if (state.showGrid) {
-      ctx.strokeStyle = "rgba(255,255,255,0.35)";
-      ctx.lineWidth = 1;
+      const scale = dispW / artW;
+      const lw = scale >= 1 ? 1 : Math.max(1, Math.ceil(1 / scale));
+      const off = lw % 2 === 1 ? 0.5 : 0;
+      ctx.strokeStyle = "rgba(255,255,255,0.4)";
+      ctx.lineWidth = lw;
       const cellsX = Math.ceil(artW / 128);
       const cellsY = Math.ceil(artH / 128);
       for (let x = 1; x < cellsX; x++) {
+        const px = x * 128 + off;
         ctx.beginPath();
-        ctx.moveTo(x * 128 + 0.5, 0);
-        ctx.lineTo(x * 128 + 0.5, artH);
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, artH);
         ctx.stroke();
       }
       for (let y = 1; y < cellsY; y++) {
+        const py = y * 128 + off;
         ctx.beginPath();
-        ctx.moveTo(0, y * 128 + 0.5);
-        ctx.lineTo(artW, y * 128 + 0.5);
+        ctx.moveTo(0, py);
+        ctx.lineTo(artW, py);
         ctx.stroke();
+      }
+
+      // map cell coordinates (only drawn when the cells are large enough to read)
+      const cellPx = 128 * scale;
+      if (state.showGridLabels && cellPx >= 30) {
+        const longLabel = cellPx >= 66;
+        for (let my = 0; my < cellsY; my++) {
+          for (let mx = 0; mx < cellsX; mx++) {
+            drawGridLabel(ctx, longLabel ? `map_${mx}_${my}` : `${mx},${my}`, mx * 128, my * 128, scale);
+          }
+        }
       }
     }
     $("canvasEmpty").hidden = true;
-    fitPreviewCanvas();
+    hidePreviewTip();
+  }
+
+  // draws a small label at bitmap coordinates, scaled so it stays ~11px on screen
+  function drawGridLabel(ctx, text, x, y, scale) {
+    const fs = Math.max(8, Math.round(11 / scale));
+    ctx.font = `600 ${fs}px "Segoe UI", "Microsoft YaHei", sans-serif`;
+    const padX = Math.round(5 / scale);
+    const padY = Math.round(3 / scale);
+    const bw = ctx.measureText(text).width + padX * 2;
+    const bh = fs + padY * 2;
+    const bx = x + Math.round(4 / scale);
+    const by = y + Math.round(4 / scale);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, bw, bh, Math.min(bh / 2, 5 / scale));
+    else ctx.rect(bx, by, bw, bh);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
+    ctx.textBaseline = "top";
+    ctx.fillText(text, bx + padX, by + padY);
+  }
+
+  /* ---------------- preview hover tooltip ---------------- */
+
+  // returns { rows: [...], rgb: [r,g,b] } for the pixel under the cursor, or null
+  function previewTipContent(clientX, clientY) {
+    const canvas = $("preview");
+    if (!state.showHoverInfo || state.viewMode !== "result" || !state.quantized || !state.gen) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const artW = canvas.width;
+    const artH = canvas.height;
+    const x = Math.floor(((clientX - rect.left) / rect.width) * artW);
+    const y = Math.floor(((clientY - rect.top) / rect.height) * artH);
+    if (x < 0 || y < 0 || x >= artW || y >= artH) return null;
+    const tw = getTargetW();
+    const i = (y * tw + x) * 4;
+    const pix = state.quantized.pixels;
+    if (i + 3 >= pix.length) return null;
+    const r = pix[i];
+    const g = pix[i + 1];
+    const b = pix[i + 2];
+    const rows = [`像素 ${x}, ${y} · 地图 map_${Math.floor(x / 128)}_${Math.floor(y / 128)}`];
+    const csAndTone = state.gen.exactRGBToColourSetIdAndTone([r, g, b]);
+    if (!csAndTone || csAndTone.colourSetId === "-1") {
+      rows.push("空格（透明 / 未放置方块）");
+      return { rows, rgb: [r, g, b] };
+    }
+    const toneNames = { dark: "暗色", normal: "普通", light: "亮色", unobtainable: "不可获得" };
+    const cs = C[csAndTone.colourSetId];
+    const blockId = state.selectedBlocks[csAndTone.colourSetId];
+    const block = cs && cs.blocks ? cs.blocks[blockId] : null;
+    rows.push(`色号 ${csAndTone.colourSetId} · ${cs ? cs.colourName : "?"} · ${toneNames[csAndTone.tone] || csAndTone.tone}`);
+    rows.push(`方块 ${block ? block.displayName : "未选择"}`);
+    rows.push(`颜色 RGB ${r}, ${g}, ${b}`);
+    const tone = cs && cs.tonesRGB ? cs.tonesRGB[csAndTone.tone] || cs.tonesRGB.normal : null;
+    return { rows, rgb: tone || [r, g, b] };
+  }
+
+  function showPreviewTip(e) {
+    const tip = $("previewTip");
+    const info = previewTipContent(e.clientX, e.clientY);
+    if (!info) {
+      tip.hidden = true;
+      return;
+    }
+    tip.innerHTML =
+      `<div class="tip-row"><span class="swatch" style="background:rgb(${info.rgb[0]},${info.rgb[1]},${info.rgb[2]})"></span><span>${esc(info.rows[0])}</span></div>` +
+      info.rows
+        .slice(1)
+        .map((t) => `<div class="tip-row"><span class="tip-dim">${esc(t)}</span></div>`)
+        .join("");
+    tip.hidden = false;
+    const pad = 14;
+    const w = tip.offsetWidth;
+    const h = tip.offsetHeight;
+    let left = e.clientX + pad;
+    let top = e.clientY + pad;
+    if (left + w > window.innerWidth - 8) left = e.clientX - w - pad;
+    if (top + h > window.innerHeight - 8) top = e.clientY - h - pad;
+    tip.style.left = Math.max(8, left) + "px";
+    tip.style.top = Math.max(8, top) + "px";
+  }
+
+  function hidePreviewTip() {
+    const tip = $("previewTip");
+    if (tip) tip.hidden = true;
   }
 
   /* ---------------- stats ---------------- */
@@ -1381,7 +1564,7 @@
                 const cw = Math.min(128, W - cx * 128);
                 const ch = Math.min(128, H - cy * 128);
                 const bytes = gen.buildWallSchematicNbtCell(layouts, cx * 128, cy * 128, cw, ch, "MapArt Generator");
-                files.push({ name: `${folder}/part_${cx}_${cy}.nbt`, data: bytes });
+                files.push({ name: `${folder}/${baseName}_part_${cx}_${cy}.nbt`, data: bytes });
               }
             }
           }
@@ -1393,7 +1576,7 @@
           for (let my = 0; my < state.mapsY; my++) {
             for (let mx = 0; mx < state.mapsX; mx++) {
               const bytes = gen.buildSchematicNbt(layouts[my][mx].coloursLayout, "MapArt Generator");
-              files.push({ name: `${folder}/${partPrefix}_${mx}_${my}.nbt`, data: bytes });
+              files.push({ name: `${folder}/${baseName}_${partPrefix}_${mx}_${my}.nbt`, data: bytes });
             }
           }
         }
@@ -1606,7 +1789,7 @@
           const layout = layouts[c];
           if (formats.includes("nbt")) {
             const bytes = batch.gen.buildSchematicNbt(layout, "MapArt Generator");
-            files.push({ name: `Schematic-NBT/${partPrefix}_${mx}_${my}.nbt`, data: bytes });
+            files.push({ name: `Schematic-NBT/${batch.baseName}_${partPrefix}_${mx}_${my}.nbt`, data: bytes });
           }
           if (formats.includes("litematic") && !batch.litematicState) {
             const bytes = batch.gen.buildLitematicBytes([[{ coloursLayout: layout }]], `${batch.baseName}_${partPrefix}_${mx}_${my}`, "MapArt Generator");
@@ -1723,6 +1906,7 @@
       lines.push(`  对齐行(noobline): ${state.includeNoobline ? "包含" : "不包含"}`);
     }
     lines.push(`  抖动: ${Object.values(K.DITHER_METHODS).find((m) => m.id === state.dither).name}`);
+    if (isDiffusionApplicable()) lines.push(`  扩散强度: ${state.diffusionStrength}%`);
     lines.push(`  颜色匹配: ${state.colourMetric === "rgb" ? "RGB 欧氏距离" : state.colourMetric === "lab" ? "Lab 色彩空间" : "CIEDE2000 感知色差"}`);
     lines.push(`  孤立像素抑制: ${state.isolatedCleanup ? "开（" + state.isolatedPasses + " 遍）" : "关"}`);
     lines.push(`  透明背景: ${state.transparentBg ? "开" : "关"}${isPngImage() ? "（PNG 生效）" : "（当前图片不是 PNG）"}`);
@@ -1734,7 +1918,7 @@
         if (state.nbtMode === "merged") {
           lines.push(`  [Schematic-NBT/] 整面墙一个 .nbt 文件（${baseName}.nbt）`);
         } else {
-          lines.push(`  [Schematic-NBT/] 墙面按 128×128 方块分区，每区一个 .nbt 文件（part_x_y.nbt）`);
+          lines.push(`  [Schematic-NBT/] 墙面按 128×128 方块分区，每区一个 .nbt 文件（${baseName}_part_x_y.nbt）`);
         }
         lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
@@ -1745,12 +1929,13 @@
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
         lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
       } else if (state.blockSizeMode) {
-        lines.push(`  [Schematic-NBT/] 按 128×128 分区，每区一个 .nbt 文件（part_x_y.nbt）`);
+        lines.push(`  [Schematic-NBT/] 按 128×128 分区，每区一个 .nbt 文件（${baseName}_part_x_y.nbt）`);
         lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
         lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);
       } else {
         lines.push(`  [Schematic-NBT/] 每张地图一个 .nbt 文件 (Schematica 格式)`);
+        lines.push(`    - 文件名 ${baseName}_map_x_y.nbt，x 为横向、y 为纵向序号`);
         lines.push(`    - 使用 Litematica：放入 .minecraft/schematics/ 文件夹，游戏内加载`);
         lines.push(`    - 使用 Schematica：放入 .minecraft/schematics/ 文件夹后加载`);
         lines.push(`    - 也可以导入 Baritone (build schematic) 或 WorldEdit (/schematic load)`);

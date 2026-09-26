@@ -616,6 +616,28 @@ details.sub-group > summary::marker { color: var(--green); }
 }
 .toast.error { border-color: var(--red); }
 
+/* ===== preview hover tooltip ===== */
+
+.preview-tip {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  background: rgba(10, 14, 19, 0.94);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  max-width: 260px;
+  white-space: nowrap;
+}
+.preview-tip .tip-row { display: flex; align-items: center; gap: 6px; }
+.preview-tip .tip-dim { color: var(--text-dim); }
+.preview-tip .tip-val { color: var(--gold); font-family: var(--mono); }
+.preview-tip .swatch { width: 14px; height: 14px; }
+
 /* ===== scrollbars ===== */
 
 .block-list::-webkit-scrollbar, .stats-table-wrap::-webkit-scrollbar { width: 8px; }

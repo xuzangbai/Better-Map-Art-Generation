@@ -4,7 +4,7 @@
    Data versions verified from official Mojang client jars (Aug 2026). */
 
 window.MapArtConstants = (() => {
-  const TOOL_VERSION = "v1.26";
+  const TOOL_VERSION = "v1.33";
 
   /* layout modes: flat floor map art vs. vertical wall pixel art */
   const LAYOUT_MODES = {

@@ -21,7 +21,7 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <span class="badge" id="toolBadge">工具 v1.26</span>
+      <span class="badge" id="toolBadge">工具 v1.33</span>
       <span class="badge" id="versionBadge">版本 1.21.11</span>
       <span class="badge badge-link" id="qqBadge" title="点击复制 QQ 群号">BUG 反馈群 249694605</span>
     </div>
@@ -77,6 +77,11 @@
       <div class="field">
         <label class="label">游戏版本</label>
         <select id="mcVersion"></select>
+      </div>
+      <div class="field">
+        <label class="label">导出名称（文件名）</label>
+        <input type="text" id="exportName" placeholder="默认使用上传的图片文件名">
+        <p class="hint">用于 ZIP 包与所有导出文件（.nbt / .litematic）的文件名</p>
       </div>
       <div class="field">
         <label class="label">输出格式</label>
@@ -201,6 +206,8 @@
 
       <div class="field">
         <label class="label check-inline"><input type="checkbox" id="showGrid"><span class="ck-box"></span><span class="ck-label">显示地图网格线</span></label>
+        <label class="label check-inline"><input type="checkbox" id="showGridLabels" checked><span class="ck-box"></span><span class="ck-label">显示网格坐标（map_x_y）</span></label>
+        <label class="label check-inline"><input type="checkbox" id="showHoverInfo" checked><span class="ck-box"></span><span class="ck-label">悬浮显示像素信息</span></label>
       </div>
     </section>
 
@@ -216,6 +223,11 @@
       </div>
       <div class="field" id="serpentineField" hidden>
         <label class="label check-inline"><input type="checkbox" id="serpentine"><span class="ck-box"></span><span class="ck-label">蛇形扫描（误差扩散方向交替，减少伪影）</span></label>
+      </div>
+      <div class="field" id="diffusionField" hidden>
+        <label class="label">扩散强度 <span class="val" id="diffusionVal">100%</span></label>
+        <input type="range" id="diffusionStrength" min="0" max="200" value="100">
+        <p class="hint">误差扩散类算法的误差传播量：100% 为标准，调低更干净、调高颗粒感更强（0% = 只取最接近的颜色）</p>
       </div>
       <div class="field">
         <label class="label check-inline"><input type="checkbox" id="gpuAccel"><span class="ck-box"></span><span class="ck-label">GPU 加速（颜色查找表）</span></label>
@@ -354,6 +366,7 @@
 </footer>
 
 <div class="toast" id="toast" hidden></div>
+<div class="preview-tip" id="previewTip" hidden></div>
 
 <script src="js/pako.min.js"></script>
 <script src="data/colours.js"></script>
