@@ -76,6 +76,17 @@
     blockSearch: "",
     batch: null, // active batch calculation state
     tipTimer: null, // preview tooltip auto-hide timer (touch)
+    textMode: false, // generate the source from typed text instead of an image
+    textInput: "文字",
+    textFont: "sans",
+    textSize: 64, // text height in pixels (= blocks)
+    textW: 128, // auto canvas size for the text (grows with the text)
+    textH: 128,
+    textKey: "", // key of the currently rendered text image
+    textImageBackup: null, // image restored when leaving text mode
+    textBlocksBackup: null, // block selection restored when leaving text mode
+    textNbtModeBackup: null, // nbt file mode restored when leaving text mode
+    textLitematicModeBackup: null, // litematic file mode restored when leaving text mode
   };
 
   /* ---------------- init ---------------- */
@@ -174,6 +185,21 @@
     updateSerpentineVisibility();
     $("diffusionStrength").value = state.diffusionStrength;
     updateDiffusionVisibility();
+    // text mode
+    const fontSel = $("textFont");
+    for (const f of K.TEXT_FONTS) {
+      const opt = document.createElement("option");
+      opt.value = f.id;
+      opt.textContent = f.name;
+      fontSel.appendChild(opt);
+    }
+    fontSel.value = state.textFont;
+    $("textInput").value = state.textInput;
+    $("textSize").value = state.textSize;
+    $("textSizeVal").textContent = state.textSize;
+    $("textLayout").value = state.layoutMode;
+    $("textMode").checked = state.textMode;
+    updateTextModeUI();
     $("toolBadge").textContent = "工具 " + K.TOOL_VERSION;
     $("exportName").value = state.exportName;
     updateSizeHint();
@@ -213,6 +239,22 @@
       clearImage();
     });
     $("btnSample").addEventListener("click", loadSampleImage);
+
+    // text mode
+    $("textMode").addEventListener("change", (e) => setTextMode(e.target.checked));
+    $("textInput").addEventListener("input", (e) => {
+      state.textInput = e.target.value;
+      schedulePreview();
+    });
+    $("textFont").addEventListener("change", (e) => {
+      state.textFont = e.target.value;
+      schedulePreview();
+    });
+    bindSlider("textSize", "textSizeVal", (v) => v, (v) => (state.textSize = v));
+    $("textLayout").addEventListener("change", (e) => {
+      $("layoutMode").value = e.target.value;
+      switchLayoutMode(e.target.value);
+    });
     $("qqBadge").addEventListener("click", () => {
       const group = "249694605";
       const done = () => toast("已复制 QQ 群号：" + group + "（BUG 反馈群）");
@@ -558,13 +600,194 @@
     $("sizeHint").hidden = on;
     $("blockSizeRow").hidden = !on;
     $("blockSizeHint").hidden = !on;
-    const hideMapdat = state.layoutMode === "wall" || state.blockSizeMode;
+    const hideMapdat = state.layoutMode === "wall" || state.blockSizeMode || state.textMode;
     $("fmtMapdatLabel").style.display = hideMapdat ? "none" : "";
     if (hideMapdat && state.formats.mapdat) {
       state.formats.mapdat = false;
       $("fmtMapdat").checked = false;
     }
     updateMapdatOptsVisibility();
+  }
+
+  /* ---------------- text mode (type text instead of uploading an image) ---------------- */
+
+  function isTextMode() {
+    return state.textMode;
+  }
+
+  function setTextMode(on) {
+    if (on === state.textMode) return;
+    state.textMode = on;
+    if (on) {
+      state.textImageBackup = { img: state.image, name: state.imageName, size: state.imageSize };
+      state.textBlocksBackup = Object.assign({}, state.selectedBlocks);
+      applyPreset(presetIndexById("obsidian")); // 黑曜石 preset
+      renderPalette();
+      updatePaletteCount();
+      // text mode defaults to whole-image single files (no map grid split)
+      state.textNbtModeBackup = state.nbtMode;
+      state.textLitematicModeBackup = state.litematicMode;
+      state.nbtMode = "merged";
+      state.litematicMode = "merged";
+      $("nbtMode").value = "merged";
+      $("litematicMode").value = "merged";
+      state.textKey = "";
+    } else {
+      if (state.textImageBackup) {
+        state.image = state.textImageBackup.img;
+        state.imageName = state.textImageBackup.name;
+        state.imageSize = state.textImageBackup.size;
+        state.textImageBackup = null;
+      }
+      if (state.textBlocksBackup) {
+        state.selectedBlocks = state.textBlocksBackup;
+        state.textBlocksBackup = null;
+        renderPalette();
+        updatePaletteCount();
+      }
+      if (state.textNbtModeBackup !== null) {
+        state.nbtMode = state.textNbtModeBackup;
+        state.textNbtModeBackup = null;
+        $("nbtMode").value = state.nbtMode;
+      }
+      if (state.textLitematicModeBackup !== null) {
+        state.litematicMode = state.textLitematicModeBackup;
+        state.textLitematicModeBackup = null;
+        $("litematicMode").value = state.litematicMode;
+      }
+      state.textKey = "";
+      state.quantized = null;
+      state.layouts = null;
+      state.genSignature = "";
+      if (state.image) {
+        $("dzInner").hidden = true;
+        $("dzThumb").hidden = false;
+        $("dzName").textContent = state.imageName;
+        $("dzSize").textContent = state.imageSize ? formatBytes(state.imageSize) : "";
+        $("dzImg").src = state.image.src;
+      } else {
+        $("dzInner").hidden = false;
+        $("dzThumb").hidden = true;
+        $("canvasEmpty").hidden = false;
+        $("previewInfo").textContent = "等待图片…";
+        $("previewSize").textContent = "";
+        renderStats(null);
+      }
+      updateGenName();
+    }
+    updateTextModeUI();
+    syncBlockSizeUI();
+    updateGenUI();
+    schedulePreview();
+  }
+
+  function updateTextModeUI() {
+    const on = state.textMode;
+    $("textPanel").hidden = !on;
+    $("dropzone").hidden = on;
+    $("sampleRow").hidden = on;
+    $("textLayout").value = state.layoutMode;
+    updateSizeFieldsVisibility();
+  }
+
+  // the size inputs are hidden in text mode (the canvas follows the text)
+  function updateSizeFieldsVisibility() {
+    const isWall = state.layoutMode === "wall";
+    $("flatSizeField").hidden = isWall || state.textMode;
+    $("wallSizeField").hidden = !isWall || state.textMode;
+  }
+
+  // measures the text at the current font/size (the canvas auto-grows to fit it)
+  function measureTextSize() {
+    const size = Math.max(1, Math.round(state.textSize));
+    const font = (K.TEXT_FONTS.find((f) => f.id === state.textFont) || K.TEXT_FONTS[0]).css;
+    const ctx = document.createElement("canvas").getContext("2d");
+    ctx.font = `${size}px ${font}`;
+    const lines = String(state.textInput || "").split("\n");
+    let maxW = 0;
+    for (const ln of lines) if (ln) maxW = Math.max(maxW, ctx.measureText(ln).width);
+    const lineH = Math.round(size * 1.18);
+    const pad = Math.max(1, Math.round(size * 0.06));
+    return {
+      w: Math.max(1, Math.ceil(maxW) + pad * 2),
+      h: Math.max(1, lineH * lines.length + pad * 2),
+      size,
+      lineH,
+    };
+  }
+
+  // text mode: the map / block / wall sizes follow the measured text size
+  function applyTextSizeToTargets(m) {
+    const MAX = 4096;
+    if (state.layoutMode === "wall") {
+      state.wallW = Math.min(MAX, m.w);
+      state.wallH = Math.min(MAX, m.h);
+      $("wallW").value = state.wallW;
+      $("wallH").value = state.wallH;
+    } else if (state.blockSizeMode) {
+      state.blockW = Math.min(MAX, m.w);
+      state.blockH = Math.min(MAX, m.h);
+      $("blockW").value = state.blockW;
+      $("blockH").value = state.blockH;
+      syncBlockCells();
+    } else {
+      state.mapsX = Math.max(1, Math.ceil(m.w / 128));
+      state.mapsY = Math.max(1, Math.ceil(m.h / 128));
+      $("mapsX").value = state.mapsX;
+      $("mapsY").value = state.mapsY;
+    }
+    updateSizeHint();
+    updateBatchSizeVisibility();
+  }
+
+  // renders the current text into an image and uses it as the source image
+  async function syncTextImage() {
+    if (!state.textMode) return;
+    const key = [state.textInput, state.textFont, state.textSize, state.layoutMode].join("\u0001");
+    if (key === state.textKey && state.image) return;
+    const m = measureTextSize();
+    state.textW = m.w;
+    state.textH = m.h;
+    applyTextSizeToTargets(m);
+    const canvas = document.createElement("canvas");
+    canvas.width = m.w;
+    canvas.height = m.h;
+    const ctx = canvas.getContext("2d");
+    const font = (K.TEXT_FONTS.find((f) => f.id === state.textFont) || K.TEXT_FONTS[0]).css;
+    ctx.font = `${m.size}px ${font}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffffff";
+    const lines = String(state.textInput || "").split("\n");
+    const startY = m.h / 2 - (m.lineH * lines.length) / 2 + m.lineH / 2;
+    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], m.w / 2, startY + i * m.lineH);
+    const hint = $("textSizeHint");
+    if (hint) {
+      let text = `文字画布 ${m.w} × ${m.h} 格（自动适配文字大小）`;
+      if (state.layoutMode !== "wall" && !state.blockSizeMode) text += `，占用地图 ${state.mapsX} × ${state.mapsY} 张`;
+      hint.textContent = text;
+    }
+    const url = canvas.toDataURL("image/png");
+    const firstLine = lines.find((l) => l.trim()) || "文字";
+    const name = (sanitizeFileName(firstLine).slice(0, 20) || "文字") + ".png";
+    await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        state.image = img;
+        state.imageName = name;
+        state.imageSize = 0;
+        state.textKey = key;
+        $("dzImg").src = url;
+        $("dzInner").hidden = true;
+        $("dzThumb").hidden = false;
+        $("dzName").textContent = name;
+        $("dzSize").textContent = "";
+        updateGenName();
+        resolve();
+      };
+      img.onerror = () => reject(new Error("文字图片生成失败"));
+      img.src = url;
+    });
   }
 
   /* ---------------- image loading ---------------- */
@@ -766,12 +989,22 @@
   // actual artwork size in pixels/blocks
   function getArtW() {
     if (state.layoutMode === "wall") return state.wallW;
-    return state.blockSizeMode ? state.blockW : state.mapsX * 128;
+    if (state.blockSizeMode) return state.blockW;
+    if (state.textMode) return state.textW;
+    return state.mapsX * 128;
   }
 
   function getArtH() {
     if (state.layoutMode === "wall") return state.wallH;
-    return state.blockSizeMode ? state.blockH : state.mapsY * 128;
+    if (state.blockSizeMode) return state.blockH;
+    if (state.textMode) return state.textH;
+    return state.mapsY * 128;
+  }
+
+  // artwork size that is not aligned to the 128 grid (block-size / text mode):
+  // the processing canvas is padded, the layouts are cropped back to the artwork
+  function isPaddedArtMode() {
+    return isBlockSizeActive() || (state.textMode && state.layoutMode !== "wall");
   }
 
   // processing canvas size (block-size mode pads up to the 128 grid; padding stays empty)
@@ -829,9 +1062,10 @@
     const isWall = mode === "wall";
 
     if (isWall) {
-      // remember flat selection, then switch to the solid preset
+      // remember flat selection, then switch to the wall default preset
       state.flatBlocksBackup = Object.assign({}, state.selectedBlocks);
-      applySolidPreset();
+      if (state.textMode) applyPreset(presetIndexById("obsidian")); // text mode keeps the obsidian preset
+      else applySolidPreset();
       // wall mode defaults to no dithering (block textures are viewed directly)
       state.flatDitherBackup = state.dither;
       state.dither = K.DITHER_METHODS.None.id;
@@ -864,13 +1098,13 @@
     }
 
     // UI visibility
-    $("flatSizeField").hidden = isWall;
-    $("wallSizeField").hidden = !isWall;
+    updateSizeFieldsVisibility();
     $("staircaseField").style.display = isWall ? "none" : "";
     $("supportPanel").style.display = isWall ? "none" : "";
     updateSizeHint();
     updateSerpentineVisibility();
     updateDiffusionVisibility();
+    updateTextModeUI();
     syncBlockSizeUI();
     updateBatchSizeVisibility();
     updateGenUI();
@@ -914,7 +1148,7 @@
   }
 
   function updateMapdatOptsVisibility() {
-    const mapdatOn = state.formats.mapdat && state.layoutMode !== "wall" && !state.blockSizeMode;
+    const mapdatOn = state.formats.mapdat && state.layoutMode !== "wall" && !state.blockSizeMode && !state.textMode;
     $("mapdatOpts2").style.display = mapdatOn ? "" : "none";
     $("mapdatIdStartField").style.display = mapdatOn && state.mapdatUseId ? "" : "none";
   }
@@ -1006,8 +1240,8 @@
       wallMode: state.layoutMode === "wall",
       serpentine: state.serpentine && isSerpentineApplicable(),
       diffusionStrength: state.diffusionStrength,
-      artW: isBlockSizeActive() ? state.blockW : 0,
-      artH: isBlockSizeActive() ? state.blockH : 0,
+      artW: isPaddedArtMode() ? getArtW() : 0,
+      artH: isPaddedArtMode() ? getArtH() : 0,
     }, overrides || {}));
   }
 
@@ -1127,6 +1361,7 @@
 
   // runs quantization + layout extraction if the cache is stale; returns {gen, quantized, layouts}
   async function ensureQuantization(onProgress) {
+    await syncTextImage(); // text mode: keep the rendered text image up to date
     const signature = getGenSignature();
     if (state.gen && state.genSignature === signature && state.quantized && state.layouts) {
       return { gen: state.gen, quantized: state.quantized, layouts: state.layouts };
@@ -1143,7 +1378,7 @@
       state.layoutMode === "wall"
         ? gen.extractColoursLayoutWall(imageData.data, W, H)
         : gen.extractColoursLayouts(imageData.data, cellsX, cellsY);
-    if (isBlockSizeActive()) layouts = gen.cropColoursLayouts(layouts, getArtW(), getArtH());
+    if (isPaddedArtMode()) layouts = gen.cropColoursLayouts(layouts, getArtW(), getArtH());
     state.gen = gen;
     state.genSignature = signature;
     state.quantized = { pixels: imageData.data, maps: quantized.maps };
@@ -1185,11 +1420,11 @@
       drawPreview();
       updateStats();
       if (state.layoutMode === "wall") {
-        $("previewInfo").textContent = `墙面 ${state.wallW}×${state.wallH} 方块 · 立式模式 · 已启用 ${getSelectedBlockCount()}/61 色`;
+        $("previewInfo").textContent = `墙面 ${state.wallW}×${state.wallH} 方块 · 立式模式${state.textMode ? " · 文字模式" : ""} · 已启用 ${getSelectedBlockCount()}/61 色`;
       } else if (state.blockSizeMode) {
-        $("previewInfo").textContent = `方块尺寸 ${state.blockW}×${state.blockH} · 非地图尺寸模式 · 已启用 ${getSelectedBlockCount()}/61 色`;
+        $("previewInfo").textContent = `方块尺寸 ${state.blockW}×${state.blockH} · 非地图尺寸模式${state.textMode ? " · 文字模式" : ""} · 已启用 ${getSelectedBlockCount()}/61 色`;
       } else {
-        $("previewInfo").textContent = `分辨率 ${state.mapsX * 128}×${state.mapsY * 128} · 地图 ${state.mapsX}×${state.mapsY} · 已启用 ${getSelectedBlockCount()}/61 色`;
+        $("previewInfo").textContent = `分辨率 ${state.mapsX * 128}×${state.mapsY * 128} · 地图 ${state.mapsX}×${state.mapsY}${state.textMode ? " · 文字模式" : ""} · 已启用 ${getSelectedBlockCount()}/61 色`;
       }
       $("previewSize").textContent = `原图 ${state.image.naturalWidth}×${state.image.naturalHeight}`;
       updateGenUI();
@@ -1453,6 +1688,11 @@
     }
   }
 
+  // finds a preset by its id (used by text mode / wall defaults)
+  function presetIndexById(id) {
+    return K.BLOCK_PRESETS.findIndex((p) => p.id === id);
+  }
+
   function updatePaletteCount() {
     $("paletteCount").textContent = `已启用 ${getSelectedBlockCount()} / ${Object.keys(C).length} 色`;
   }
@@ -1621,7 +1861,7 @@
         setProgress(step);
       }
 
-      if (formats.includes("mapdat") && state.layoutMode !== "wall" && !state.blockSizeMode) {
+      if (formats.includes("mapdat") && state.layoutMode !== "wall" && !state.blockSizeMode && !state.textMode) {
         setStatus("正在生成 MapData (map.dat)…");
         await yieldToUI();
         const folder = K.OUTPUT_FORMATS.MAPDAT.folder;
@@ -1889,6 +2129,11 @@
     lines.push("");
     lines.push("配置：");
     lines.push(`  游戏版本: ${state.version}`);
+    if (state.textMode) {
+      lines.push(`  输入方式: 文字模式`);
+      lines.push(`  文字内容: ${(state.textInput || "").split("\n").join(" / ")}`);
+      lines.push(`  字体: ${(K.TEXT_FONTS.find((f) => f.id === state.textFont) || {}).name || state.textFont}，大小 ${state.textSize}`);
+    }
     if (isWall) {
       lines.push(`  布局模式: 立式（墙面像素画）`);
       lines.push(`  墙面尺寸: ${state.wallW} × ${state.wallH} 方块（1 格 = 1 像素，厚 1 格）`);

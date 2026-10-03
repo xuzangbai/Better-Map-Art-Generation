@@ -21,7 +21,7 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <span class="badge" id="toolBadge">工具 v1.33</span>
+      <span class="badge" id="toolBadge">工具 v1.37</span>
       <span class="badge" id="versionBadge">版本 1.21.11</span>
       <span class="badge badge-link" id="qqBadge" title="点击复制 QQ 群号">BUG 反馈群 249694605</span>
     </div>
@@ -41,7 +41,8 @@
   <aside class="sidebar">
 
     <section class="panel">
-      <h2 class="panel-title">1 · 上传图片</h2>
+      <h2 class="panel-title">1 · 图片 / 文字</h2>
+      <label class="label check-inline" style="margin-bottom:10px"><input type="checkbox" id="textMode"><span class="ck-box"></span><span class="ck-label">文字模式（输入文字生成投影）</span></label>
       <div class="dropzone" id="dropzone" tabindex="0">
         <input type="file" id="fileInput" accept="image/*" hidden>
         <div class="dz-inner" id="dzInner">
@@ -60,8 +61,32 @@
           <button type="button" class="btn btn-small btn-danger" id="btnRemoveImage">移除</button>
         </div>
       </div>
-      <div class="row-between">
+      <div class="row-between" id="sampleRow">
         <button type="button" class="btn btn-ghost" id="btnSample">使用示例图片</button>
+      </div>
+
+      <div id="textPanel" hidden>
+        <div class="field">
+          <label class="label">文字内容（支持多行）</label>
+          <textarea id="textInput" rows="3" spellcheck="false" placeholder="输入要投影的文字…">文字</textarea>
+        </div>
+        <div class="field">
+          <label class="label">字体</label>
+          <select id="textFont"></select>
+        </div>
+        <div class="field">
+          <label class="label">文字大小 <span class="val" id="textSizeVal">64</span></label>
+          <input type="range" id="textSize" min="4" max="512" value="64">
+          <p class="hint" id="textSizeHint"></p>
+        </div>
+        <div class="field">
+          <label class="label">文字方向</label>
+          <select id="textLayout">
+            <option value="flat" selected>平铺（地面投影）</option>
+            <option value="wall">立式（墙面投影）</option>
+          </select>
+        </div>
+        <p class="hint">文字为白色、背景透明；方块预设为黑曜石（仅黑色色阶，可在预设行一键换「哭泣黑曜石」，两者同色阶）；默认输出整图单文件（NBT / Litematic），想按 128 分区可在「输出设置」里改</p>
       </div>
     </section>
 

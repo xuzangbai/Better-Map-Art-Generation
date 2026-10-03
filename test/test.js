@@ -1210,6 +1210,50 @@ function expandLongPackedArray(bytes, bitsPerItem, length) {
     assert(invalid32 === 0, "custom strengths output valid palette colours (invalid=" + invalid32 + ")");
   }
 
+  console.log("=== Test 33: obsidian preset (text mode default) ===");
+  {
+    const preset = K.BLOCK_PRESETS.find((p) => p.id === "obsidian");
+    assert(
+      preset && preset.blocks.length === 1 && preset.blocks[0][0] === 28 && preset.blocks[0][1] === 7,
+      "obsidian preset exists (csId 28, block 7)"
+    );
+    const cryingPreset = K.BLOCK_PRESETS.find((p) => p.id === "cryingObsidian");
+    assert(
+      cryingPreset && cryingPreset.blocks.length === 1 && cryingPreset.blocks[0][0] === 28 && cryingPreset.blocks[0][1] === 8,
+      "crying obsidian preset exists (csId 28, block 8)"
+    );
+    const sel = {};
+    for (const k of Object.keys(C)) sel[k] = "-1";
+    sel[28] = "7";
+    const g = makeGenerator({ selectedBlocks: sel, ditherId: K.DITHER_METHODS.None.id, staircaseId: K.STAIRCASING.CLASSIC.id });
+    g.setup();
+    const img = makeTestImage(1, 1, (x) => (x < 64 ? [255, 255, 255] : [0, 0, 0]));
+    await g.processImageData({ data: img.data }, 1, 1);
+    const layouts = g.extractColoursLayouts(img.data, 1, 1);
+    const nbt = g.buildSchematicNbt(layouts[0][0].coloursLayout);
+    const root = new NBTReader(nbt.buffer ? nbt.buffer : nbt).readNamedTag();
+    const names = root.value.palette.value.value.map((p) => p.Name.value);
+    assert(names.length === 1 && names[0] === "minecraft:obsidian", "obsidian-only NBT palette (got " + JSON.stringify(names) + ")");
+    let other = 0;
+    for (let x = 0; x < 128; x++) {
+      for (let z = 0; z < 128; z++) {
+        const p = layouts[0][0].coloursLayout[x][z];
+        if (p.colourSetId !== "-1" && p.colourSetId !== "28") other++;
+      }
+    }
+    assert(other === 0, "all pixels map to colour set 28 (others=" + other + ")");
+    // the crying obsidian block variant produces the same map colour set
+    sel[28] = "8";
+    const g2 = makeGenerator({ selectedBlocks: sel, ditherId: K.DITHER_METHODS.None.id });
+    g2.setup();
+    const img2 = makeTestImage(1, 1, () => [255, 255, 255]);
+    await g2.processImageData({ data: img2.data }, 1, 1);
+    const nbt2 = g2.buildSchematicNbt(g2.extractColoursLayouts(img2.data, 1, 1)[0][0].coloursLayout);
+    const root2 = new NBTReader(nbt2.buffer ? nbt2.buffer : nbt2).readNamedTag();
+    const names2 = root2.value.palette.value.value.map((p) => p.Name.value);
+    assert(names2.length === 1 && names2[0] === "minecraft:crying_obsidian", "crying obsidian variant works (got " + JSON.stringify(names2) + ")");
+  }
+
 })().catch((e) => {
   console.error("Test harness error:", e);
   process.exit(1);

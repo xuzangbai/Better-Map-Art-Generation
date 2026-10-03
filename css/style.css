@@ -224,7 +224,7 @@ body {
 }
 .label .val { color: var(--gold); font-family: var(--mono); font-size: 12px; }
 
-select, input[type="text"], input[type="number"], input[type="search"] {
+select, input[type="text"], input[type="number"], input[type="search"], textarea {
   width: 100%;
   background: var(--bg);
   color: var(--text);
@@ -236,10 +236,11 @@ select, input[type="text"], input[type="number"], input[type="search"] {
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-select:focus, input[type="text"]:focus, input[type="number"]:focus, input[type="search"]:focus {
+select:focus, input[type="text"]:focus, input[type="number"]:focus, input[type="search"]:focus, textarea:focus {
   border-color: var(--green);
   box-shadow: 0 0 0 3px rgba(91, 192, 91, 0.15);
 }
+textarea { resize: vertical; min-height: 64px; line-height: 1.5; }
 select option { background: var(--bg-2); color: var(--text); }
 
 .num-input { width: 100%; }

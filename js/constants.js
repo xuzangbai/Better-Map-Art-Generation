@@ -4,7 +4,7 @@
    Data versions verified from official Mojang client jars (Aug 2026). */
 
 window.MapArtConstants = (() => {
-  const TOOL_VERSION = "v1.33";
+  const TOOL_VERSION = "v1.37";
 
   /* layout modes: flat floor map art vs. vertical wall pixel art */
   const LAYOUT_MODES = {
@@ -314,6 +314,28 @@ window.MapArtConstants = (() => {
         [45, 0], [46, 0], [47, 0], [48, 0], [49, 0], [50, 0], [52, 2], [53, 0], [55, 2], [56, 0],
       ],
     },
+    {
+      name: "黑曜石",
+      id: "obsidian",
+      desc: "仅黑色色阶，方块为黑曜石（黑曜石与哭泣黑曜石同色阶，可用「哭泣黑曜石」预设切换）",
+      blocks: [[28, 7]],
+    },
+    {
+      name: "哭泣黑曜石",
+      id: "cryingObsidian",
+      desc: "仅黑色色阶，方块为哭泣黑曜石（与黑曜石同色阶）",
+      blocks: [[28, 8]],
+    },
+  ];
+
+  /* text mode font choices (rendered on a canvas) */
+  const TEXT_FONTS = [
+    { id: "sans", name: "黑体 / 无衬线", css: '"Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif' },
+    { id: "serif", name: "宋体 / 衬线", css: '"SimSun", "Songti SC", "STSong", serif' },
+    { id: "kai", name: "楷体", css: '"KaiTi", "Kaiti SC", "STKaiti", serif' },
+    { id: "hei", name: "黑体 SimHei", css: '"SimHei", "Heiti SC", "Microsoft YaHei", sans-serif' },
+    { id: "mono", name: "等宽", css: '"Cascadia Mono", "Consolas", "Courier New", monospace' },
+    { id: "impact", name: "粗标题 Impact", css: '"Impact", "Arial Black", "Microsoft YaHei", sans-serif' },
   ];
 
   return {
@@ -331,5 +353,6 @@ window.MapArtConstants = (() => {
     BACKGROUND_MODES,
     OUTPUT_FORMATS,
     BLOCK_PRESETS,
+    TEXT_FONTS,
   };
 })();
